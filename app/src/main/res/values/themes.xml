@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <style name="Theme.ObservatoryLauncher" parent="android:Theme.Material.NoActionBar">
+        <!-- Compose描画前の一瞬に見える背景。ここが既定の白のままだと
+             ホーム復帰のたびに白フラッシュが挟まりぎこちなく見える -->
+        <item name="android:windowBackground">@color/observatory_ground</item>
+    </style>
+</resources>

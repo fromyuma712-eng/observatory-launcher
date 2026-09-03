@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      Compose未接続の一瞬(windowBackground)にだけ必要なXMLリソース。
+      値の正本はui/theme/Color.kt の ObservatoryColors.Ground。変更時は両方直すこと。
+    -->
+    <color name="observatory_ground">#FF22303C</color>
+</resources>

@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "note": "宣言的レイアウト。ここに書いた順序と区分がホーム画面の台帳そのものになる。未導入のパッケージは黙って除外される。既定は最小——足りない分は検索から長押しで足す。",
+  "sections": [
+    {
+      "title": "常用",
+      "items": [
+        "com.google.android.dialer",
+        "com.google.android.apps.messaging",
+        "jp.naver.line.android",
+        "com.android.chrome",
+        "com.google.android.GoogleCamera",
+        "com.google.android.calendar"
+      ]
+    }
+  ]
+}

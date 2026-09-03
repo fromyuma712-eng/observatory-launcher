@@ -1,0 +1,141 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission android:name="android.permission.SET_WALLPAPER" />
+
+    <!-- プライベートスペース(別プロファイル)を一覧に出すために必要。既定のホームにのみ許される。 -->
+    <uses-permission android:name="android.permission.ACCESS_HIDDEN_PROFILES" />
+    <!-- 予定の直近数件を自前の組版で出すため。書き込みは行わない。 -->
+    <uses-permission android:name="android.permission.READ_CALENDAR" />
+
+    <!-- 天気。位置は粗い精度で足りる(市区町村単位)。 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+
+    <!--
+        Health Connect。**宣言した種類しか許可を求められない**——
+        宣言が一つも無い状態で許可画面へ送っても、こちらに関する項目は現れない。
+        以前「個別許可が必要」と促しながら何も起きなかったのはこれが理由である。
+    -->
+    <uses-permission android:name="android.permission.health.READ_STEPS" />
+    <uses-permission android:name="android.permission.health.READ_SLEEP" />
+    <uses-permission android:name="android.permission.health.READ_HEART_RATE" />
+    <uses-permission
+        android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
+
+    <!--
+        ここから下は**PCから一度だけ解錠する**権限である。
+        宣言しておかないと `adb shell pm grant` が対象を見つけられないので、
+        使う前に宣言だけ先に置く。宣言しただけでは何の力も持たない
+        （与えられるまでは常に拒否され、面の側では施錠として扱う）。
+
+            adb shell pm grant com.yuma.observatorylauncher android.permission.WRITE_SECURE_SETTINGS
+            adb shell pm grant com.yuma.observatorylauncher android.permission.DUMP
+
+        WRITE_SECURE_SETTINGS … 設定アプリが隠している項目の読み書き
+        DUMP                  … dumpsys 相当（SystemUI Tuner・Naptime と同じ手口）
+        BATTERY_STATS         … 端末によっては拒まれる。可否の確認そのものが目的
+        READ_LOGS             … 常用しない。可否の確認のみ
+
+        ⚠️ アプリを入れ直すと与えた権限は消える。解錠の状態は必ず実測を出すこと。
+    -->
+    <uses-permission
+        android:name="android.permission.WRITE_SECURE_SETTINGS"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission
+        android:name="android.permission.DUMP"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission
+        android:name="android.permission.BATTERY_STATS"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission
+        android:name="android.permission.READ_LOGS"
+        tools:ignore="ProtectedPermissions" />
+
+    <!--
+        Android 11以降、他アプリは既定で見えない。ランチャーとして一覧を組むために
+        「起動可能なアプリ」だけを可視範囲に宣言する(QUERY_ALL_PACKAGESは使わない＝
+        必要な範囲を超えて要求しない)。
+    -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
+
+    <application
+        android:allowBackup="true"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:enableOnBackInvokedCallback="true"
+        android:fullBackupContent="@xml/backup_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.ObservatoryLauncher">
+        <!--
+            LAUNCHER カテゴリは持たない。持つと「普通のアプリ」としても起動でき、
+            ホームのタスク(type=home)とは別に type=standard のタスクが増えて、
+            アプリ切り替え(最近使用)にランチャー自身が並んでしまう。
+            ホームは HOME カテゴリだけで足りる。
+        -->
+        <!--
+            ホームは常駐する面なので、向きや表示サイズが変わるたびに作り直させない。
+            作り直すと現在のページ・編集中・スクロール位置が失われる。
+            Compose は設定変更を受け取って組み直せるので、こちらで抱える。
+        -->
+        <activity
+            android:name=".MainActivity"
+            android:configChanges="density|fontScale|keyboard|keyboardHidden|layoutDirection|locale|navigation|orientation|screenLayout|screenSize|smallestScreenSize|uiMode"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:launchMode="singleTask"
+            android:stateNotNeeded="true"
+            android:theme="@style/Theme.ObservatoryLauncher"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.HOME" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+        <activity
+            android:name=".WebShortcutActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:theme="@style/Theme.ObservatoryLauncher" />
+        <service
+            android:name=".data.ObservatoryNotificationListener"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
+        <!--
+            Health Connect の「このアプリは何に使うのか」から呼ばれる入口。
+            Android 14 以降はこの別名が要る。呼べるのは OS だけである
+            （START_VIEW_PERMISSION_USAGE を持つのは OS のみ）。
+        -->
+        <activity-alias
+            android:name="ViewPermissionUsageActivity"
+            android:exported="true"
+            android:permission="android.permission.START_VIEW_PERMISSION_USAGE"
+            android:targetActivity=".MainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW_PERMISSION_USAGE" />
+                <category android:name="android.intent.category.HEALTH_PERMISSIONS" />
+            </intent-filter>
+        </activity-alias>
+    </application>
+
+</manifest>
