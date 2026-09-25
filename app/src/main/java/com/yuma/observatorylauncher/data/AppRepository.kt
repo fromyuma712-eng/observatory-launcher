@@ -228,8 +228,16 @@ object AppRepository {
 
     /** 関門を通さずに起動する。問いに答えた後は、こちらを通る。 */
     fun launchNow(context: Context, entry: AppEntry): Boolean = runCatching {
+        // 押した像の場所を起動先へ渡す（sourceBounds）。アプリによってはそこから開く。
+        //
+        // ⚠️ **像から拡がって開く動きは、ホームアプリの側からは付けられない**（2026-09-25 実機）。
+        // `ActivityOptions.makeScaleUpAnimation`／`makeClipRevealAnimation` を渡しても、
+        // Android 17 は標準の「右から滑り込む」開き方で上書きした。
+        // Pixel の純正ランチャーが像から拡げられるのは、システムにしか与えられない権限
+        // （リモートの遷移アニメーションの制御）を持っているからで、adb でも付与できない。
+        val origin = com.yuma.observatorylauncher.ui.LaunchOrigin.take()
         context.getSystemService(LauncherApps::class.java)
-            .startMainActivity(entry.component, entry.user, null, null)
+            .startMainActivity(entry.component, entry.user, origin, null)
         true
     }.getOrElse {
         // 端末側の事情で拒まれたときだけ従来の経路へ落とす(本体プロファイルのみ有効)。
@@ -449,14 +457,17 @@ object AppRepository {
 
     private val iconCache = ConcurrentHashMap<String, ImageBitmap>()
 
-    private fun iconKey(entry: AppEntry, sizePx: Int): String =
-        entry.component.flattenToShortString() + "|" + entry.user.hashCode() + "|" + sizePx
+    private fun iconKey(entry: AppEntry, sizePx: Int, mono: Boolean): String =
+        entry.component.flattenToShortString() + "|" + entry.user.hashCode() + "|" + sizePx +
+            if (mono) "|mono" else ""
 
     /** 既に作ってあるものだけを返す。描画の最中に復号を始めないための入口。 */
-    fun cachedIcon(entry: AppEntry, sizePx: Int): ImageBitmap? = iconCache[iconKey(entry, sizePx)]
+    fun cachedIcon(entry: AppEntry, sizePx: Int, mono: Boolean): ImageBitmap? =
+        iconCache[iconKey(entry, sizePx, mono)]
 
-    fun icon(context: Context, entry: AppEntry, sizePx: Int): ImageBitmap? {
-        val key = iconKey(entry, sizePx)
+    /** @param mono 単色で描くか（[com.yuma.observatorylauncher.ui.IconTone]）。 */
+    fun icon(context: Context, entry: AppEntry, sizePx: Int, mono: Boolean): ImageBitmap? {
+        val key = iconKey(entry, sizePx, mono)
         iconCache[key]?.let { return it }
         val made =
             runCatching {
@@ -466,7 +477,7 @@ object AppRepository {
                 val density = context.resources.displayMetrics.densityDpi
                 val drawable: Drawable = activity?.getBadgedIcon(density)
                     ?: context.packageManager.getApplicationIcon(entry.packageName)
-                drawable.toImageBitmap(sizePx)
+                if (mono) IconMono.render(drawable, sizePx, entry.label) else drawable.toShapedBitmap(sizePx)
             }.getOrNull()
         if (made != null) iconCache[key] = made
         return made
@@ -477,11 +488,11 @@ object AppRepository {
      * 弾いて流している最中に復号を始めると、その回数だけ描画が詰まる——
      * 面を開いた時点で背景に寄せてしまえば、走査中はキャッシュに当たるだけになる。
      */
-    suspend fun warmIcons(context: Context, entries: List<AppEntry>, sizePx: Int) {
+    suspend fun warmIcons(context: Context, entries: List<AppEntry>, sizePx: Int, mono: Boolean) {
         withContext(Dispatchers.Default) {
             entries.forEach { entry ->
                 if (!isActive) return@withContext
-                if (cachedIcon(entry, sizePx) == null) icon(context, entry, sizePx)
+                if (cachedIcon(entry, sizePx, mono) == null) icon(context, entry, sizePx, mono)
             }
         }
     }
@@ -504,6 +515,63 @@ object AppRepository {
     fun invalidate() {
         iconCache.clear()
         cache = emptyList()
+    }
+
+    /**
+     * 像の形を揃える。
+     *
+     * ## ⚠️ 古い形式の像だけ、形がばらばらだった（2026-09-25）
+     *
+     * 適応型の像（`AdaptiveIconDrawable`）は端末の形（Pixel は円）で切り抜かれて届く。
+     * 古い形式の像は描かれた形のまま届くので、一覧に**円と四角が混ざっていた**
+     * （skyticket・31Club・スズ薬局など）。Pixel の純正ランチャーと同じ扱いで揃える。
+     *
+     * - **四隅まで塗った四角**（全面に地色がある像）は、円に切り抜く。
+     * - **四隅が透けている像**（形を自分で持っている像）は、白い円に縮めて載せる。
+     *
+     * 仕事中の側（仕事用プロファイル）の鞄の印は `getBadgedIcon` が描き込み済みなので、
+     * 適応型でなくても形の判定の前に既に載っている——そこは切らないよう、円は外接させない。
+     */
+    private fun Drawable.toShapedBitmap(sizePx: Int): ImageBitmap {
+        if (this is android.graphics.drawable.AdaptiveIconDrawable) return toImageBitmap(sizePx)
+        val raw = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
+        Canvas(raw).also { c ->
+            setBounds(0, 0, sizePx, sizePx)
+            draw(c)
+        }
+        val inset = (sizePx * 0.06f).toInt().coerceAtLeast(1)
+        val corners = listOf(
+            raw.getPixel(inset, inset),
+            raw.getPixel(sizePx - 1 - inset, inset),
+            raw.getPixel(inset, sizePx - 1 - inset),
+            raw.getPixel(sizePx - 1 - inset, sizePx - 1 - inset),
+        )
+        val fullBleed = corners.all { android.graphics.Color.alpha(it) > 200 }
+        val out = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(out)
+        val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG or android.graphics.Paint.FILTER_BITMAP_FLAG)
+        val r = sizePx / 2f
+        if (fullBleed) {
+            // 地色ごと円に切り抜く。
+            canvas.drawCircle(r, r, r, paint)
+            paint.xfermode = android.graphics.PorterDuffXfermode(android.graphics.PorterDuff.Mode.SRC_IN)
+            canvas.drawBitmap(raw, 0f, 0f, paint)
+        } else {
+            // 白い円に、円に内接する大きさへ縮めて載せる。
+            paint.color = android.graphics.Color.WHITE
+            canvas.drawCircle(r, r, r, paint)
+            val scale = 0.70f
+            val side = sizePx * scale
+            val offset = (sizePx - side) / 2f
+            canvas.drawBitmap(
+                raw,
+                null,
+                android.graphics.RectF(offset, offset, offset + side, offset + side),
+                android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG),
+            )
+        }
+        raw.recycle()
+        return out.asImageBitmap()
     }
 
     private fun Drawable.toImageBitmap(sizePx: Int): ImageBitmap {

@@ -83,6 +83,14 @@ data class LayoutConfig(
     data class Display(
         val iconSize: Int = 24,
         val showLabels: Boolean = true,
+        /**
+         * 像を単色で描くか（2026-09-25）。**既定は単色。**
+         *
+         * > 「アプリアイコンの色が変えれるならデザインを統一させて、かつそのアプリが何かもわかるように」（本人）
+         *
+         * 色とりどりの像が「地と字は 88:12」を最も崩していた。形（ロゴ）は残し、色だけを紙色に揃える。
+         */
+        val monoIcons: Boolean = true,
     )
 
 
@@ -102,7 +110,8 @@ data class LayoutConfig(
             "display",
             JSONObject()
                 .put("iconSize", display.iconSize)
-                .put("showLabels", display.showLabels),
+                .put("showLabels", display.showLabels)
+                .put("monoIcons", display.monoIcons),
         )
         root.put("pageCount", pageCount.coerceAtLeast(1))
         if (frictionApps.isNotEmpty()) {
@@ -193,6 +202,22 @@ data class LayoutConfig(
         }
         return base.copy(sections = sections)
     }
+
+    /**
+     * 節の中の並びを、与えた順に置き直す（引いて並べ替えたとき、離した瞬間に一度だけ）。
+     *
+     * ⚠️ 以前は一区画越えるたびに [movedUp]・[movedDown] を一回ずつ宣言へ書いていた。
+     * 引く一回で世代が十も二十も増え、「元に戻す(60)」になっていた（2026-09-25）。
+     *
+     * [order] に無いもの・節に無いものは無視する。節にあって [order] に無いものは末尾に残す。
+     */
+    fun sectionReordered(title: String, order: List<String>): LayoutConfig = copy(
+        sections = sections.map { section ->
+            if (section.title != title) return@map section
+            val present = order.filter { it in section.items }.distinct()
+            section.copy(items = present + section.items.filterNot { it in present })
+        },
+    )
 
     fun movedUp(packageName: String): LayoutConfig =
         copy(sections = sections.map { it.moved(packageName, -1) })
@@ -498,6 +523,8 @@ data class LayoutConfig(
 
     fun withLabels(show: Boolean): LayoutConfig = copy(display = display.copy(showLabels = show))
 
+    fun withMonoIcons(mono: Boolean): LayoutConfig = copy(display = display.copy(monoIcons = mono))
+
 
 
 
@@ -656,6 +683,7 @@ data class LayoutConfig(
                 display = Display(
                     iconSize = display?.optInt("iconSize", 24) ?: 24,
                     showLabels = display?.optBoolean("showLabels", true) ?: true,
+                    monoIcons = display?.optBoolean("monoIcons", true) ?: true,
                 ),
                 pageCount = pageCount,
                 infoTiles = if (root.has("infoTiles")) {

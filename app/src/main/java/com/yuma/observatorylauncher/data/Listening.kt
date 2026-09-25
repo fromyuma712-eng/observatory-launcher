@@ -53,6 +53,31 @@ internal object Listening {
 
     const val LOG_NAME = "listening.json"
 
+    /**
+     * 記録してよいアプリ。**音楽を聴くためのアプリだけ**に絞る。
+     *
+     * > 「音楽のデータを収集するのは Apple Music と YouTube Music に絞ってください」
+     * > （本人・2026/9/25）
+     *
+     * ## ⚠️ 絞らなかった頃に起きていたこと
+     *
+     * 見張りは「今いちばん上の席」を何でも記録していたので、Chrome・YouTube・
+     * レコーダーまで「聴いた曲」として数えていた。**動画は一本が数時間ある**ため、
+     * [spans] の頭打ち（曲の長さ）が効かず、聴取時間が膨らむ。
+     *
+     * 新しく書かないだけでなく、**読むときにも同じ線で落とす**（[read]）。
+     * 既に記録されたものも数えから外れ、次に書くときに記録からも消える。
+     */
+    val SOURCES = setOf(
+        "com.apple.android.music",
+        "com.google.android.apps.youtube.music",
+    )
+
+    fun isSource(app: String): Boolean = app in SOURCES
+
+    /** 記録してよいアプリの分だけ残す。 */
+    fun fromSources(plays: List<Play>): List<Play> = plays.filter { isSource(it.app) }
+
     /** 保つ長さ。ひと月。 */
     const val KEEP_MS = 30L * 24 * 60 * 60_000
 
@@ -66,6 +91,17 @@ internal object Listening {
      * そのまま書くと同じ曲が並ぶので、**直前と同じ題・演者ならこの間合いの間は書かない**。
      */
     const val DEDUPE_MS = 60_000L
+
+    /**
+     * 同じ曲を「同じ一回」とみなす間合い。**曲の長さの九割**（短ければ [DEDUPE_MS]）。
+     *
+     * ⚠️ 一分で切っていたので、曲の途中で止めて一分後に再開すると、
+     * **再開のたびに一曲増えていた**（2026/9/25 の点検）。
+     * 長さの九割までは同じ一回とみなす。一曲を最後まで聴いてもう一度かけた
+     * （一曲リピート）ときは、次の知らせが長さちょうどの頃に来るので、別の一回に数える。
+     */
+    fun sameTrackWindow(last: Play): Long =
+        maxOf(DEDUPE_MS, (last.durationMs * 9) / 10)
 
     // ---- 読み書き（純粋な部分は端末なしで確かめられる） ----------------------
 
@@ -117,7 +153,7 @@ internal object Listening {
         if (last != null &&
             last.title == play.title &&
             last.artist == play.artist &&
-            play.at - last.at < DEDUPE_MS
+            play.at - last.at < sameTrackWindow(last)
         ) {
             return existing
         }
@@ -247,10 +283,11 @@ internal object Listening {
 
     // ---- 端末側 -------------------------------------------------------------
 
+    /** 記録を読む。**記録してよいアプリ以外はここで落とす**（[SOURCES]）。 */
     fun read(context: Context): List<Play> {
         val file = File(context.filesDir, LOG_NAME)
         if (!file.exists()) return emptyList()
-        return parse(runCatching { file.readText() }.getOrDefault(""))
+        return fromSources(parse(runCatching { file.readText() }.getOrDefault("")))
     }
 
     private fun write(context: Context, plays: List<Play>) {
@@ -260,7 +297,7 @@ internal object Listening {
     /** 一曲を記録する。書き込みは失敗しても黙って諦める——面を壊す理由にならない。 */
     @Synchronized
     fun record(context: Context, play: Play) {
-        if (play.title.isBlank()) return
+        if (play.title.isBlank() || !isSource(play.app)) return
         val next = appended(read(context), play)
         write(context, next)
     }

@@ -30,7 +30,12 @@ class ObservatoryNotificationListener : NotificationListenerService() {
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
 
     private val playbackCallback = object : MediaController.Callback() {
-        override fun onMetadataChanged(metadata: MediaMetadata?) = capture(metadata)
+        // ⚠️ **鳴っているときだけ記録する**（2026/9/25 の点検）。
+        // 曲の情報はアプリを開いただけでも届く（止まったままの前回の曲）。
+        // それを記録すると、聴いていない曲が一曲ぶん数えられていた。
+        override fun onMetadataChanged(metadata: MediaMetadata?) {
+            if (isPlaying()) capture(metadata)
+        }
         override fun onPlaybackStateChanged(state: PlaybackState?) {
             // 鳴り始めた瞬間も拾う。曲が変わらないまま再開したときが該当する。
             if (state?.state == PlaybackState.STATE_PLAYING) capture(watching?.metadata)
@@ -70,8 +75,11 @@ class ObservatoryNotificationListener : NotificationListenerService() {
         watching?.unregisterCallback(playbackCallback)
         watching = next
         watching?.registerCallback(playbackCallback, handler)
-        capture(next?.metadata)
+        if (isPlaying()) capture(next?.metadata)
     }
+
+    private fun isPlaying(): Boolean =
+        runCatching { watching?.playbackState?.state == PlaybackState.STATE_PLAYING }.getOrDefault(false)
 
     /** 題と演者だけを取り、記録へ渡す。**通知の本文はここを通らない。** */
     private fun capture(metadata: MediaMetadata?) {
@@ -81,6 +89,8 @@ class ObservatoryNotificationListener : NotificationListenerService() {
             ?: metadata?.getString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST)
             ?: ""
         val app = watching?.packageName.orEmpty()
+        // 音楽のアプリ以外は記録しない（[Listening.SOURCES]）。色を採る手間もかけない。
+        if (!Listening.isSource(app)) return
         val duration = metadata?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: -1L
         // 絵柄の色は**直に入っているときだけ**採る。
         // ⚠️ ここで在り処（URI）を辿って外へ出てはならない——
@@ -118,6 +128,17 @@ class ObservatoryNotificationListener : NotificationListenerService() {
         val active = runCatching { activeNotifications?.toList().orEmpty() }.getOrDefault(emptyList())
             .filterNot { it.packageName == packageName }
         val media = active.firstOrNull { it.notification.category == Notification.CATEGORY_TRANSPORT }
+        // 印を付けるアプリ。**知らせとして残っているものだけ**——常駐（録音中・案内中）、
+        // 再生の操作、束ねの見出しは「読むべき知らせ」ではないので数えない。本文は見ない。
+        badged.value = active
+            .filter { sbn ->
+                sbn.isClearable &&
+                    !sbn.isOngoing &&
+                    sbn.notification.category != Notification.CATEGORY_TRANSPORT &&
+                    (sbn.notification.flags and Notification.FLAG_GROUP_SUMMARY) == 0
+            }
+            .map { it.packageName }
+            .toSet()
         snapshot = NotificationSnapshot(
             count = active.size,
             mediaTitle = media?.notification?.extras
@@ -131,6 +152,9 @@ class ObservatoryNotificationListener : NotificationListenerService() {
         @Volatile
         var snapshot: NotificationSnapshot = NotificationSnapshot()
             private set
+
+        /** 知らせの残っているアプリ（package 名）。像の右肩の印に使う（2026-09-25）。 */
+        val badged = kotlinx.coroutines.flow.MutableStateFlow<Set<String>>(emptySet())
     }
 }
 

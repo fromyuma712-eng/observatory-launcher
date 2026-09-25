@@ -213,4 +213,27 @@ class LayoutConfigTest {
         assertEquals(LayoutConfig.WIDGET_HEIGHTS.toSet(), seen)
         assertEquals(0, config.widgets.first { it.id == 9 }.height)
     }
+
+    // ── 引いて並べ替える（2026-09-25） ─────────────────────
+
+    @Test
+    fun `並べ替えは与えた順になり他の節は動かない`() {
+        val config = LayoutConfig(
+            sections = listOf(
+                LayoutConfig.Section("Daily", listOf("a", "b", "c", "d")),
+                LayoutConfig.Section("Other", listOf("x", "y")),
+            ),
+        )
+        val next = config.sectionReordered("Daily", listOf("c", "a", "d", "b"))
+        org.junit.Assert.assertEquals(listOf("c", "a", "d", "b"), next.sections[0].items)
+        org.junit.Assert.assertEquals(listOf("x", "y"), next.sections[1].items)
+    }
+
+    @Test
+    fun `並べ替えで失われるものは無い`() {
+        val config = LayoutConfig(sections = listOf(LayoutConfig.Section("Daily", listOf("a", "b", "c"))))
+        // 知らない id は捨て、渡し忘れた id は末尾に残す。
+        val next = config.sectionReordered("Daily", listOf("c", "zzz", "a"))
+        org.junit.Assert.assertEquals(listOf("c", "a", "b"), next.sections[0].items)
+    }
 }

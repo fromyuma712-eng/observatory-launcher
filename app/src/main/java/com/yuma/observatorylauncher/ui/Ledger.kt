@@ -81,6 +81,8 @@ fun AppRow(
     fallbackLabel: String? = null,
     actions: List<LedgerAction> = emptyList(),
     expanded: Boolean = false,
+    /** 知らせが残っているか。像の右肩に印を出す（[notificationMark]）。 */
+    badged: Boolean = false,
 ) {
     val interaction = remember { MutableInteractionSource() }
     val iconSize = display.iconSize.dp
@@ -92,10 +94,10 @@ fun AppRow(
                 .fillMaxWidth()
                 .heightIn(min = rowHeight)
                 .then(if (index != null) Modifier.riseIn(index) else Modifier)
-                .pressFade(interaction)
+                .launchOrigin()
                 .combinedClickable(
                     interactionSource = interaction,
-                    indication = null,
+                    indication = PressIndication.Row,
                     onClick = onClick,
                     onLongClick = onLongClick,
                 )
@@ -120,7 +122,7 @@ fun AppRow(
                     Image(
                         bitmap = icon,
                         contentDescription = null,
-                        modifier = Modifier.size(iconSize),
+                        modifier = Modifier.size(iconSize).notificationMark(badged),
                     )
                 } else if (fallbackLabel != null) {
                     FallbackIcon(fallbackLabel, iconSize)
@@ -196,16 +198,15 @@ private fun ActionItem(action: LedgerAction) {
     Box(
         modifier = Modifier
             .heightIn(min = ObservatoryDimens.Row)
-            .pressFade(interaction)
             .combinedClickable(
                 interactionSource = interaction,
-                indication = null,
+                indication = PressIndication.Row,
                 onClick = action.onClick,
             )
             .padding(horizontal = 12.dp),
         contentAlignment = Alignment.CenterStart,
     ) {
-        ObservatoryText(text = action.label, color = ObservatoryColors.EmberText, size = 13.sp)
+        ObservatoryText(text = action.label, color = ObservatoryColors.EmberText, size = ObservatoryType.Note)
     }
 }
 
@@ -229,10 +230,9 @@ fun GroupHeader(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .pressFade(interaction)
                 .combinedClickable(
                     interactionSource = interaction,
-                    indication = null,
+                    indication = PressIndication.Row,
                     onClick = onToggleMenu,
                     onLongClick = onToggleMenu,
                 )
@@ -249,9 +249,15 @@ fun GroupHeader(
             if (renaming) {
                 NameField(initial = title, onDone = onRename)
             } else {
+                // 既定の群には欧文の札を添える（「TOOLS 道具」、[Lexicon.group]）。利用者が付けた名には付かない。
+                Lexicon.group(title)?.let { tag ->
+                    ObservatoryTag(text = tag, color = if (menuOpen) ObservatoryColors.EmberText else ObservatoryColors.Faint)
+                    Spacer(modifier = Modifier.width(8.dp))
+                }
+                // ⚠️ 名は罫の色（Line・2.6:1）で描いていた。**罫の色は字に使わない**（Color.kt）。
                 ObservatoryText(
                     text = title,
-                    color = if (menuOpen) ObservatoryColors.EmberText else ObservatoryColors.Line,
+                    color = if (menuOpen) ObservatoryColors.EmberText else ObservatoryColors.Faint,
                     size = ObservatoryType.Note,
                     tracking = 0.24f,
                 )
@@ -292,8 +298,8 @@ fun NameField(initial: String, onDone: (String) -> Unit) {
         cursorBrush = SolidColor(ObservatoryColors.Ember),
         textStyle = TextStyle(
             color = ObservatoryColors.EmberText,
-            fontSize = 13.sp,
-            fontFamily = FontFamily.SansSerif,
+            fontSize = ObservatoryType.Body,
+            fontFamily = ObservatoryFonts.Sans,
             letterSpacing = 0.3.sp,
         ),
         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
@@ -315,14 +321,28 @@ fun IconCluster(
     entries: List<ClusterItem>,
     display: LayoutConfig.Display,
     modifier: Modifier = Modifier,
+    /** 与えれば、長押しで引いて並べ替えられる（[ReorderableIconGrid]）。離したときの並びを返す。 */
+    onReorder: ((List<String>) -> Unit)? = null,
 ) {
     val iconSize = display.iconSize.dp + 8.dp
     // 名前を出すときは枡を広げる。像だけの幅で一行に切ると、
     // 「メッセー…」のような残骸になる。一列に減るが、読める方を採る。
+    // ⚠️ 字の下限を 12sp に上げたので（2026/9/25）、56dp の枡では
+    // 「Apple …」「YT Mu…」と切れた。**読める幅まで広げる。**
     val cell = if (display.showLabels) {
-        iconSize.coerceAtLeast(56.dp)
+        iconSize.coerceAtLeast(72.dp)
     } else {
         iconSize.coerceAtLeast(44.dp)
+    }
+    if (onReorder != null) {
+        ReorderableIconGrid(
+            entries = entries,
+            display = display,
+            cell = cell,
+            onReorder = onReorder,
+            modifier = modifier,
+        )
+        return
     }
     FlowRow(
         modifier = modifier
@@ -333,59 +353,26 @@ fun IconCluster(
         horizontalArrangement = Arrangement.spacedBy(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        val cellPx = with(LocalDensity.current) { cell.toPx() + 16.dp.toPx() }
         entries.forEachIndexed { i, item ->
             val interaction = remember(item.key) { MutableInteractionSource() }
-            // 長押ししてから引くと、その像が指について動く。一区画を越えるたびに
-            // 並びを一つずらす。横並びは折り返すので、行末を越えれば次の行の先頭へ回る。
-            var drag by remember(item.key) { mutableFloatStateOf(0f) }
-            val move = item.onMove
-            val dragModifier = if (move == null) {
-                Modifier
-            } else {
-                // 編集中は**長押しを介さず、そのまま引ける**。
-                // 長押ししてから引く、という手順は覚えていないと辿り着けない
-                // ——実際に「操作が分からなかった」と報告を受けた。
-                // 編集中は押せば操作列が開き、引けば動く、の二つだけにする。
-                Modifier.pointerInput(item.key) {
-                    detectDragGestures(
-                        onDragEnd = { drag = 0f },
-                        onDragCancel = { drag = 0f },
-                    ) { change, amount ->
-                        change.consume()
-                        drag += amount.x
-                        if (drag > cellPx) {
-                            move(1)
-                            drag -= cellPx
-                        } else if (drag < -cellPx) {
-                            move(-1)
-                            drag += cellPx
-                        }
-                    }
-                }
-            }
             Column(
                 modifier = Modifier
                     .width(cell)
-                    .graphicsLayer { translationX = drag }
                     .riseIn(i)
-                    .pressFade(interaction)
+                    .launchOrigin()
                     .combinedClickable(
                         interactionSource = interaction,
-                        indication = null,
+                        indication = PressIndication.Item,
                         onClick = item.onClick,
                         onLongClick = item.onLongClick,
-                    )
-                    // 引く検出はクリックより内側に置く。外側だと長押しを
-                    // combinedClickable に先取りされ、引いても並びが動かない。
-                    .then(dragModifier),
+                    ),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 if (item.icon != null) {
                     Image(
                         bitmap = item.icon,
                         contentDescription = null,
-                        modifier = Modifier.size(display.iconSize.dp),
+                        modifier = Modifier.size(display.iconSize.dp).notificationMark(item.badged),
                     )
                 } else if (item.fallbackLabel != null) {
                     FallbackIcon(item.fallbackLabel, display.iconSize.dp)
@@ -400,9 +387,10 @@ fun IconCluster(
                     ObservatoryText(
                         text = item.label,
                         color = ObservatoryColors.Paper,
-                        size = ObservatoryType.Note,
+                        size = ObservatoryType.Label,
                         maxLines = 1,
                         center = true,
+                        condensed = true,
                         modifier = Modifier.padding(top = 4.dp),
                     )
                 }
@@ -419,13 +407,13 @@ data class ClusterItem(
     val fallbackLabel: String? = null,
     val onClick: () -> Unit,
     val onLongClick: () -> Unit,
-    /** 与えられていれば長押しから引いて並べ替えられる。編集中だけ渡す。 */
-    val onMove: ((Int) -> Unit)? = null,
+    /** 知らせが残っているか。 */
+    val badged: Boolean = false,
 )
 
 /** サイト等、Androidアプリ由来の画像を持たない項目にも空白でない識別像を与える。 */
 @Composable
-private fun FallbackIcon(label: String, size: androidx.compose.ui.unit.Dp) {
+internal fun FallbackIcon(label: String, size: androidx.compose.ui.unit.Dp) {
     Box(
         modifier = Modifier
             .size(size)

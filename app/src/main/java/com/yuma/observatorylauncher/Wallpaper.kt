@@ -12,7 +12,7 @@ import com.yuma.observatorylauncher.ui.theme.ObservatoryDimens
 import java.io.IOException
 
 private const val PREFS_NAME = "observatory_launcher"
-private const val KEY_WALLPAPER_APPLIED = "wallpaper_applied_v5"
+private const val KEY_WALLPAPER_APPLIED = "wallpaper_applied_v6"
 
 /**
  * OBSERVATORYの地色(ground)+ドットグリッドをシステム壁紙として一度だけ適用する。
@@ -36,7 +36,11 @@ fun applyObservatoryWallpaperIfNeeded(context: Context) {
     val density = metrics.density
 
     val home = observatoryField(width, height, density, truss = false)
-    val lock = observatoryDial(width, height, density)
+    // 目盛りの数字は面と同じ Plex Mono で描く（2026-09-25・v6）。取れなければ端末の等幅へ落とす。
+    val mono = runCatching {
+        androidx.core.content.res.ResourcesCompat.getFont(context, com.yuma.observatorylauncher.R.font.plex_mono_regular)
+    }.getOrNull() ?: android.graphics.Typeface.MONOSPACE
+    val lock = observatoryDial(width, height, density, mono)
 
     try {
         val manager = WallpaperManager.getInstance(context)
@@ -82,7 +86,12 @@ fun applyObservatoryWallpaperIfNeeded(context: Context) {
  * 面の中で斜材が「無名の折れ線グラフ」に見えたので取り除いた（2026/9/2）。
  * 壁紙にだけ残すと、同じ形が二つの意味を持つことになる。
  */
-private fun observatoryDial(width: Int, height: Int, density: Float): Bitmap {
+private fun observatoryDial(
+    width: Int,
+    height: Int,
+    density: Float,
+    mono: android.graphics.Typeface = android.graphics.Typeface.MONOSPACE,
+): Bitmap {
     val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
     val canvas = Canvas(bitmap)
     canvas.drawColor(ObservatoryColors.Ground.toArgb())
@@ -156,7 +165,7 @@ private fun observatoryDial(width: Int, height: Int, density: Float): Bitmap {
     // 刻みの数字。等幅・薄く。**読ませはしないが、目盛りであることは示す。**
     val label = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = paperAt(0.30)
-        typeface = android.graphics.Typeface.MONOSPACE
+        typeface = mono
         textSize = px(26.0)
     }
     canvas.drawText("04", px(60.0), py(1950.0), label)

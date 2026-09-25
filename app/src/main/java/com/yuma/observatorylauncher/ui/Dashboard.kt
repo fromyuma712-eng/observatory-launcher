@@ -14,6 +14,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.yuma.observatorylauncher.config.LayoutConfig
@@ -167,7 +169,7 @@ internal object Dashboard {
             LayoutConfig.INFO_BLUETOOTH to 2,
             LayoutConfig.INFO_NOTIFICATIONS to 2,
             LayoutConfig.INFO_TOUCH to 2,
-            LayoutConfig.INFO_DATE_BRIEF to 2,
+            // 「第39週・今年の268日目」は外した（本人・2026-09-25「これいるのか」）。
         ),
     )
 
@@ -233,26 +235,50 @@ internal fun DashboardPage(
     refreshEpoch: Int,
     modifier: Modifier = Modifier,
     frictionApps: Set<String> = emptySet(),
+    /**
+     * 節を何列に流すか。横向きでは 2。
+     *
+     * 列は**上から順に詰める**（左の列を読み終えてから右へ）。節の順は読む順なので、
+     * 左右に交互に配ると「予定の右に空、その下に集計」と目が行き来する。
+     */
+    columns: Int = 1,
 ) {
     val sections = remember(frictionApps.isEmpty()) {
         Dashboard.sections(hasFriction = frictionApps.isNotEmpty())
     }
+    @Composable
+    fun Sections(part: List<Pair<String, List<LayoutConfig.InfoTile>>>, columnModifier: Modifier) {
+        Column(modifier = columnModifier) {
+            part.forEachIndexed { index, (title, tiles) ->
+                DashboardHeading(
+                    title = title,
+                    meta = META[title].orEmpty(),
+                    modifier = Modifier.padding(top = if (index == 0) 4.dp else 18.dp),
+                )
+                InfoTilePanel(
+                    tiles = tiles,
+                    pageCount = pageCount,
+                    editing = false,
+                    commands = commands,
+                    refreshEpoch = refreshEpoch,
+                    frictionApps = frictionApps,
+                    modifier = Modifier.padding(top = 6.dp),
+                )
+            }
+        }
+    }
     Column(modifier = modifier.fillMaxWidth()) {
-        sections.forEachIndexed { index, (title, tiles) ->
-            DashboardHeading(
-                title = title,
-                meta = META[title].orEmpty(),
-                modifier = Modifier.padding(top = if (index == 0) 4.dp else 18.dp),
-            )
-            InfoTilePanel(
-                tiles = tiles,
-                pageCount = pageCount,
-                editing = false,
-                commands = commands,
-                refreshEpoch = refreshEpoch,
-                frictionApps = frictionApps,
-                modifier = Modifier.padding(top = 6.dp),
-            )
+        if (columns <= 1 || sections.size < 2) {
+            Sections(sections, Modifier.fillMaxWidth())
+        } else {
+            // ⚠️ 前半と後半で左右に割っていたら、図の多い節（空・分布）が左に集まり、
+            // 右の列が先に尽きた（本人の指摘・2026-09-25「左にグラフが偏っている」）。
+            // **節を一つずつ、その時点で低い方の列へ積む**（石積み）。高さは実際に測る。
+            Masonry(columns = columns) {
+                sections.forEach { section ->
+                    Sections(listOf(section), Modifier.fillMaxWidth().padding(bottom = 14.dp))
+                }
+            }
         }
         Spacer(modifier = Modifier.height(12.dp))
     }
@@ -312,13 +338,7 @@ internal fun BoardMasthead(
                 .padding(top = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            ObservatoryText(
-                text = "$name ∧ %02d/%02d".format(index, count),
-                color = ObservatoryColors.Faint,
-                size = ObservatoryType.Label,
-                mono = true,
-                tracking = 0.10f,
-            )
+            ObservatoryTag(text = "$name ∧ %02d/%02d".format(index, count))
             if (right.isNotBlank()) {
                 Spacer(modifier = Modifier.weight(1f))
                 ObservatoryText(
@@ -351,11 +371,15 @@ private fun DashboardHeading(
                 .background(ObservatoryColors.LineStrong),
         )
         Spacer(modifier = Modifier.width(8.dp))
+        // 案内板と同じく「札（欧）＋名（和）」の対で読ませる（[Lexicon]）。
+        Lexicon.section(title)?.let { tag ->
+            ObservatoryTag(text = tag, color = ObservatoryColors.Muted)
+            Spacer(modifier = Modifier.width(8.dp))
+        }
         ObservatoryText(
             text = title,
             color = ObservatoryColors.Muted,
             size = ObservatoryType.Note,
-            mono = true,
         )
         Spacer(modifier = Modifier.width(12.dp))
         Box(
@@ -374,6 +398,31 @@ private fun DashboardHeading(
                 size = ObservatoryType.Label,
                 mono = true,
             )
+        }
+    }
+}
+
+/**
+ * 石積み。子を一つずつ、その時点で最も低い列へ積む。
+ *
+ * 読む順は左右に行き来するが、**列の底が揃う**——片方だけが長く伸びて空きが残る方が、
+ * 横向きの面では目に付く。
+ */
+@Composable
+private fun Masonry(columns: Int, content: @Composable () -> Unit) {
+    Layout(content = content) { measurables, constraints ->
+        val width = constraints.maxWidth
+        val columnWidth = width / columns
+        val heights = IntArray(columns)
+        val placed = measurables.map { m ->
+            val p = m.measure(Constraints.fixedWidth(columnWidth))
+            val column = heights.indices.minBy { heights[it] }
+            val y = heights[column]
+            heights[column] += p.height
+            Triple(p, column, y)
+        }
+        layout(width, heights.maxOrNull() ?: 0) {
+            placed.forEach { (p, column, y) -> p.place(column * columnWidth, y) }
         }
     }
 }

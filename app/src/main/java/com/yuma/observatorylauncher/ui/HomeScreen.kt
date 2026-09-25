@@ -1,10 +1,9 @@
 package com.yuma.observatorylauncher.ui
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import android.Manifest
-import android.content.BroadcastReceiver
-import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
@@ -13,8 +12,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -22,9 +19,20 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.Arrangement
+import kotlin.math.abs
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.ui.unit.Velocity
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
@@ -34,18 +42,12 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.key
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
@@ -55,269 +57,31 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.yuma.observatorylauncher.config.LayoutConfig
-import com.yuma.observatorylauncher.config.LayoutStore
 import com.yuma.observatorylauncher.data.AppEntry
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.Dispatchers
-import com.yuma.observatorylauncher.data.Usage
-import com.yuma.observatorylauncher.data.Friction
-import com.yuma.observatorylauncher.data.Restraint
 import com.yuma.observatorylauncher.data.AppRepository
-import com.yuma.observatorylauncher.ui.theme.ObservatoryColors
 import com.yuma.observatorylauncher.ui.theme.ObservatoryDimens
 import com.yuma.observatorylauncher.ui.theme.ObservatoryDotGrid
 import com.yuma.observatorylauncher.ui.theme.ObservatoryTruss
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 import java.util.UUID
-import kotlinx.coroutines.delay
 import kotlin.math.ceil
-import androidx.compose.ui.platform.LocalConfiguration
 import android.appwidget.AppWidgetManager
 
-private const val PINNED_SECTION = "常用"
-
 /**
- * ランチャー全体の唯一の入口。状態(宣言・アプリ一覧・検索の開閉)はここだけが持ち、
- * 下位のComposableは値を受け取るだけにする。
- *
- * [homeEpoch] はホーム操作のたびに進む値。ここで検索を畳み、台帳＝基底状態へ戻す。
+ * ホーム（三面）の組み立て。入口と状態は [LauncherRoot]（LauncherRoot.kt）、
+ * アプリの台帳は [HomeLedger]（HomeLedger.kt）に分けてある（2026-09-25）。
  */
-@Composable
-fun LauncherRoot(homeEpoch: Int) {
-    val context = LocalContext.current
-    val store = remember { LayoutStore(context) }
-    var config by remember { mutableStateOf(store.load()) }
-    var apps by remember { mutableStateOf(AppRepository.cached()) }
-    var searching by remember { mutableStateOf(false) }
-    var reload by remember { mutableIntStateOf(0) }
-    var generations by remember { mutableIntStateOf(store.generationCount()) }
-
-    // アプリの導入・削除とプロファイルの施錠状態を購読する。
-    // ホームは常駐するので、開き直しに頼らず自分で追随する。
-    // 受信時に一覧を作り直すのは主スレッドを塞ぐので、印だけ進めて実作業は背景へ回す。
-    DisposableEffect(context) {
-        val receiver = object : BroadcastReceiver() {
-            override fun onReceive(c: Context?, i: Intent?) {
-                // 画面の消灯・解錠・施錠。**一覧だけ作り直し、像は残す。**
-                AppRepository.invalidateList()
-                reload += 1
-            }
-        }
-        // アプリの出入りは LauncherApps の通知で受ける。
-        // ACTION_PACKAGE_* の放送は自分のプロファイル分しか届かず、
-        // プライベートスペース側の増減を取りこぼす。
-        val packages = AppRepository.observePackages(context) {
-            AppRepository.invalidate()
-            reload += 1
-        }
-        // 画面が消えるとプライベートスペースは施錠される。その瞬間に読み直す。
-        val profiles = IntentFilter().apply {
-            addAction(Intent.ACTION_MANAGED_PROFILE_AVAILABLE)
-            addAction(Intent.ACTION_MANAGED_PROFILE_UNAVAILABLE)
-            addAction(Intent.ACTION_PROFILE_ACCESSIBLE)
-            addAction(Intent.ACTION_PROFILE_INACCESSIBLE)
-            addAction(Intent.ACTION_SCREEN_OFF)
-            addAction(Intent.ACTION_USER_PRESENT)
-        }
-        context.registerReceiver(receiver, profiles)
-        onDispose {
-            runCatching { context.unregisterReceiver(receiver) }
-            runCatching { packages.close() }
-        }
-    }
-
-    // ── 摩擦 ────────────────────────────────────────────────
-    //
-    // 起動の入口は三箇所あるので、判断は[AppRepository.gate]という
-    // **通り道の一点**に置く。ここでは「止めるかどうか」だけを決め、
-    // 止めるなら面を出す。強さの計算は背景で行う（利用状況の読み出しを伴う）。
-    var challenge by remember { mutableStateOf<PendingLaunch?>(null) }
-    var pendingEntry by remember { mutableStateOf<AppEntry?>(null) }
-
-    DisposableEffect(config.frictionApps) {
-        AppRepository.gate = gate@{ _, entry ->
-            if (entry.packageName !in config.frictionApps) return@gate false
-            pendingEntry = entry
-            true
-        }
-        onDispose { AppRepository.gate = null }
-    }
-
-    // 強さは端末への問い合わせを伴うので、掴んでから背景で決める。
-    LaunchedEffect(pendingEntry) {
-        val entry = pendingEntry ?: return@LaunchedEffect
-        val recent = withContext(Dispatchers.Default) {
-            Usage.recent(context, entry.packageName)
-        }
-        val since = recent.lastClosedAt?.let { System.currentTimeMillis() - it }
-        val level = Friction.level(recent.usedMs, since)
-        if (!level.stops) {
-            // 掛からない段。**待たせない**——判断が「掛けない」なら、
-            // 面を出さずにそのまま開く。
-            AppRepository.launchNow(context, entry)
-            pendingEntry = null
-        } else {
-            challenge = PendingLaunch(
-                entry = entry,
-                level = level,
-                notice = Friction.notice(entry.label, recent.usedMs, since),
-            )
-        }
-    }
-
-    // ホーム操作で必ず基底へ戻す。
-    //
-    // ⚠️ **頁も戻す。** 面が三つになってから、計器盤や音の面に居るまま
-    // ホームを押しても頁が残り、「ホームを押したのにホームでない」状態になっていた。
-    // 基底とは、押せば必ずそこへ帰れる場所のことである。
-    LaunchedEffect(homeEpoch) {
-        if (homeEpoch > 0) searching = false
-    }
-
-    // 一覧の作成は常に背景で。印(reload)とホーム操作の双方を引き金にする。
-    LaunchedEffect(reload, homeEpoch) {
-        apps = AppRepository.loadAsync(context)
-    }
-
-    // **像はホームに居るうちに作っておく。**
-    //
-    // 以前は一覧を開いた瞬間に温め始めていた。つまり復号と、利用者が最初に
-    // 掃く動作とが同時に走る。詰まってはいないのに**絵だけが後から追いつく**ので、
-    // 動きが重く見える（本人の見立て・2026/8/31）。
-    // ホームは常駐していて、開かれるまでの間はほぼ何もしていない。そこで済ませる。
-    //
-    // 出た直後の数枚と競らないよう、少しだけ待ってから始める。
-    val warmDensity = LocalDensity.current
-    val warmPx = remember(warmDensity, config.display.iconSize) {
-        with(warmDensity) { config.display.iconSize.dp.roundToPx() }
-    }
-    LaunchedEffect(apps, warmPx) {
-        if (apps.isEmpty()) return@LaunchedEffect
-        delay(500)
-        AppRepository.warmIcons(context, apps, warmPx)
-    }
-
-    // 控え。世代は端末の中にしか無く、端末を替えれば失われる。
-    // 外へ一枚書き出せることが、この宣言を持ち物として扱う最低条件になる。
-    var notice by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(notice) {
-        if (notice != null) {
-            delay(4000)
-            notice = null
-        }
-    }
-
-    val exportBackup = rememberLauncherForActivityResult(
-        ActivityResultContracts.CreateDocument("application/json")
-    ) { uri ->
-        if (uri == null) return@rememberLauncherForActivityResult
-        val written = runCatching {
-            context.contentResolver.openOutputStream(uri)?.use { out ->
-                out.write(store.exportText().toByteArray(Charsets.UTF_8))
-            } ?: error("開けない")
-        }.isSuccess
-        notice = if (written) "控えを書き出しました" else "書き出せませんでした"
-    }
-
-    val importBackup = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenDocument()
-    ) { uri ->
-        if (uri == null) return@rememberLauncherForActivityResult
-        val text = runCatching {
-            context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
-        }.getOrNull()
-        val restored = text?.let { store.importText(it) }
-        if (restored == null) {
-            // 読めない控えで上書きしない。今の宣言はそのまま残る。
-            notice = "この控えは読めません（今の設定はそのままです）"
-        } else {
-            config = restored
-            generations = store.generationCount()
-            notice = "控えから戻しました（元に戻すで取り消せます）"
-        }
-    }
-
-    val commit: (LayoutConfig) -> Unit = { next ->
-        store.save(next)
-        config = next
-        generations = store.generationCount()
-    }
-
-    // §N-6 地層。訂正は消さずに積むので、巻き戻し自体も新しい世代として残る。
-    val rollback: () -> Unit = {
-        store.rollback()?.let { config = it }
-        generations = store.generationCount()
-    }
-
-    Box(modifier = Modifier.fillMaxSize()) {
-        HomeScreen(
-            homeEpoch = homeEpoch,
-            config = config,
-            apps = apps,
-            generations = generations,
-            onOpenSearch = {
-                // 開く直前に施錠状態を読み直す。施錠されていれば、その場で一覧から落ちる。
-                AppRepository.refreshPrivateState(context)
-                reload += 1
-                searching = true
-            },
-            onCommit = commit,
-            onRollback = rollback,
-            notice = notice,
-            onNotice = { notice = it },
-            onExport = {
-                val stamp = SimpleDateFormat("yyyyMMdd", Locale.JAPAN).format(Date())
-                exportBackup.launch("observatory-layout-$stamp.json")
-            },
-            onImport = { importBackup.launch(arrayOf("application/json", "text/plain", "*/*")) },
-        )
-        challenge?.let { pending ->
-            ChallengePanel(
-                label = pending.entry.label,
-                notice = pending.notice,
-                level = pending.level,
-                onPass = {
-                    AppRepository.launchNow(context, pending.entry)
-                    challenge = null
-                    pendingEntry = null
-                },
-                onGiveUp = {
-                    // **開かなかったことを数える。** 我慢が記録に残らないなら、
-                    // 我慢する理由がひとつ減る。
-                    Restraint.avoided(context, pending.entry.packageName)
-                    challenge = null
-                    pendingEntry = null
-                },
-            )
-        }
-        CommandLine(
-            visible = searching,
-            apps = apps,
-            config = config,
-            generations = generations,
-            onDismiss = { searching = false },
-            onPin = { entry -> commit(config.pinned(entry.id, PINNED_SECTION)) },
-            onCommit = commit,
-            onRollback = rollback,
-            onProfileChanged = { reload += 1 },
-        )
-    }
-}
-
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun HomeScreen(
+internal fun HomeScreen(
     config: LayoutConfig,
     apps: List<AppEntry>,
     generations: Int,
     onOpenSearch: () -> Unit,
+    onStartTyping: () -> Unit,
     onCommit: (LayoutConfig) -> Unit,
     onRollback: () -> Unit,
     notice: String?,
@@ -332,6 +96,8 @@ private fun HomeScreen(
     val haptics = LocalHapticFeedback.current
     val density = LocalDensity.current
     val ui = rememberHomeEditingState()
+    // 知らせの残っているアプリ（像の右肩の印）。
+    val badges by rememberBadged()
 
     LaunchedEffect(config.pageCount) {
         ui.clampPage(config.pageCount)
@@ -465,36 +231,6 @@ private fun HomeScreen(
             config.sites.forEach { site -> put(site.id, HomeItem.Site(site)) }
         }
     }
-    val sections = remember(config, homeItems, ui.page) {
-        // 空の節も残す。足した節が見えないと中身を入れられない。
-        config.sections
-            .filter { it.page == ui.page }
-            .map { s -> s.title to s.items.mapNotNull { homeItems[it] } }
-    }
-    // 同じ問いに答える札は、置く直前にひとつへ畳む（[InfoMerge]）。
-    // 宣言は書き換えない——畳み方を変えれば、いつでも元の姿に戻る。
-    val aboveInfoTiles = remember(config.infoTiles, ui.page, ui.editorMode) {
-        InfoMerge.collapse(
-            config.infoTiles.filter {
-                it.page == ui.page && it.zone == LayoutConfig.ZONE_ABOVE
-            },
-            editing = ui.editorMode,
-        )
-    }
-    val belowInfoTiles = remember(config.infoTiles, ui.page, ui.editorMode) {
-        InfoMerge.collapse(
-            config.infoTiles.filter {
-                it.page == ui.page && it.zone == LayoutConfig.ZONE_BELOW
-            },
-            editing = ui.editorMode,
-        )
-    }
-    // 通し番号は台帳全体で一続き。行の位置が身体に残るよう、節を跨いでも振り直さない。
-    val numbers = remember(sections) {
-        sections.flatMap { it.second }
-            .mapIndexed { i, entry -> entry.id to i + 1 }
-            .toMap()
-    }
 
     Box(modifier = Modifier.fillMaxSize()) {
         // 地。編集中はここを触れば畳む(逃げ道を常に面の上に置く)。
@@ -520,7 +256,6 @@ private fun HomeScreen(
         // nestedScroll で受け取る——台帳がスクロールできる状態なら一覧の操作が優先され、
         // 行き止まり(または画面に収まっている)ときだけ検索が開く。
         val swipeThreshold = with(density) { 40.dp.toPx() }
-        val pageThreshold = with(density) { 64.dp.toPx() }
         val liftToSearch = remember(swipeThreshold) {
             object : NestedScrollConnection {
                 private var travel = 0f
@@ -539,701 +274,679 @@ private fun HomeScreen(
             }
         }
 
-        // 編集中は縦の掃きで面を離れない。並べ替えの最中に一覧へ飛ばされると、
-        // 下の方に置いたものへ手が届かなくなる。横のページ送りだけは残す。
-        // 計器盤では掃き上げで一覧へ抜けない。
+        // ## 面は指に追従して滑る（2026-09-25）
         //
-        // あの面は**長く、下まで読む**ためのものなので、巻き終わりに達するたび
-        // 一覧が開くと読むことができない。一覧へは最下端の検索行から入る。
-        val leaveGestures = if (
-            ui.editorMode ||
-            ui.page == Dashboard.PAGE ||
-            ui.page == MusicBoard.page(config.pageCount)
-        ) {
-            Modifier
-        } else {
-            Modifier.nestedScroll(liftToSearch)
+        // 以前は指を離した瞬間に面が入れ替わっていた（動きは「rise」と標識灯の二つで打ち止め、
+        // という約束があった）。本人の判断で約束を解いた——
+        // > 「スマホは動いてなんぼ快適でなんぼのもんなので制限を解除します」
+        //
+        // 指に面が付いてくるので、**どこまで引けば移るか**が見て分かり、途中で引き返せる。
+        // 隣の面は先に組んでおく（beyondViewportPageCount）——掃いた瞬間に組み始めると、
+        // 計器盤のような重い面で最初の数コマが落ちる。
+        val pageTotal = MusicBoard.page(config.pageCount) - Dashboard.PAGE + 1
+        val pager = rememberPagerState(initialPage = ui.page - Dashboard.PAGE) { pageTotal }
+        // 止まった面を「今の面」とする。移った手応えを指へ返す。
+        LaunchedEffect(pager) {
+            snapshotFlow { pager.settledPage }.collect { settled ->
+                val next = settled + Dashboard.PAGE
+                if (ui.page != next) {
+                    ui.page = next
+                    haptics.performHapticFeedback(HapticFeedbackType.SegmentTick)
+                }
+            }
+        }
+        // 外から面が指定されたら（ホームキー・頁の印・頁の追加）、そこへ滑らせる。
+        LaunchedEffect(ui.page, pageTotal) {
+            val target = (ui.page - Dashboard.PAGE).coerceIn(0, pageTotal - 1)
+            if (pager.currentPage != target && !pager.isScrollInProgress) {
+                pager.animateScrollToPage(target)
+            }
         }
 
-        Column(
+        HorizontalPager(
+            state = pager,
             modifier = Modifier
                 .fillMaxSize()
-                .then(leaveGestures)
-                .pointerInput(config.pageCount, ui.page) {
-                    var travel = 0f
-                    detectHorizontalDragGestures(
-                        onDragStart = { travel = 0f },
-                        onDragEnd = {
-                            when {
-                                // 右端は音の面。利用者の頁の一枚先に在る。
-                                travel < -pageThreshold &&
-                                    ui.page < MusicBoard.page(config.pageCount) ->
-                                    ui.page += 1
-                                // 計器盤は利用者の頁の**左**に在る。0 番に据えると
-                                // 利用者の頁が全部ずれるので、負の側へ一枚だけ伸ばす。
-                                travel > pageThreshold && ui.page > Dashboard.PAGE ->
-                                    ui.page -= 1
-                            }
-                        },
-                    ) { _, amount -> travel += amount }
-                }
-                .then(
-                    if (
-                        ui.editorMode ||
-                        ui.page == Dashboard.PAGE ||
-                        ui.page == MusicBoard.page(config.pageCount)
-                    ) {
-                        Modifier
-                    } else {
-                        Modifier.pointerInput(Unit) {
-                            var travel = 0f
-                            detectVerticalDragGestures(
-                                onDragStart = { travel = 0f },
-                                onDragEnd = { if (travel < -swipeThreshold) onOpenSearch() },
-                            ) { _, amount -> travel += amount }
-                        }
-                    }
+                .windowInsetsPadding(WindowInsets.safeDrawing),
+            beyondViewportPageCount = 1,
+        ) { index ->
+            // この面の番号。**面の中では `ui.page`（止まっている面）ではなくこれを読む**
+            // ——滑っている間は二枚が同時に見えており、両方が自分の番号で描かねばならない。
+            val page = index + Dashboard.PAGE
+            // この面が画面に見えているか（[LocalPageVisible]）。少しでも覗けば「見えている」。
+            val visible by remember(index) {
+                derivedStateOf { abs(pager.currentPage + pager.currentPageOffsetFraction - index) < 0.999f }
+            }
+            CompositionLocalProvider(LocalPageVisible provides visible) {
+            val sections = remember(config, homeItems, page) {
+                // 空の節も残す。足した節が見えないと中身を入れられない。
+                config.sections
+                    .filter { it.page == page }
+                    .map { s -> s.title to s.items.mapNotNull { homeItems[it] } }
+            }
+            // 同じ問いに答える札は、置く直前にひとつへ畳む（[InfoMerge]）。
+            // 宣言は書き換えない——畳み方を変えれば、いつでも元の姿に戻る。
+            // この面にホームの計器を出すか（[HomeInstrument]）。利用者の頁で、編集中でないとき。
+            // 編集中は札を全部見せる——計器が受け持つ札も、並べ替え・削除できなければならない。
+            val instrumentHere = page != Dashboard.PAGE &&
+                page != MusicBoard.page(config.pageCount) &&
+                !ui.editorMode
+            val aboveInfoTiles = remember(config.infoTiles, page, ui.editorMode, instrumentHere) {
+                InfoMerge.collapse(
+                    config.infoTiles.filter {
+                        it.page == page && it.zone == LayoutConfig.ZONE_ABOVE &&
+                            !(instrumentHere && it.kind in HomeInstrument.COVERS)
+                    },
+                    editing = ui.editorMode,
                 )
-                .pointerInput(Unit) {
-                    // 何も置かれていない場所の長押しで編集へ入る。Androidのホームで
-                    // 最も通りの良い作法で、時計の操作列を知らなくても辿り着ける。
-                    // 行や見出しは自前の長押しを持つので、そちらが先に受け取る。
-                    detectTapGestures(
-                        onLongPress = {
-                            // 計器盤は選ばない面なので、並べ替える対象が無い。
-                            // 編集へ入れると空の編集面に落ちるだけになる。
-                            if (ui.page != Dashboard.PAGE &&
-                                ui.page != MusicBoard.page(config.pageCount)
-                            ) {
-                                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                                ui.clearMenus()
-                                ui.editorMode = true
+            }
+            val belowInfoTiles = remember(config.infoTiles, page, ui.editorMode, instrumentHere) {
+                InfoMerge.collapse(
+                    config.infoTiles.filter {
+                        it.page == page && it.zone == LayoutConfig.ZONE_BELOW &&
+                            !(instrumentHere && it.kind in HomeInstrument.COVERS)
+                    },
+                    editing = ui.editorMode,
+                )
+            }
+            // 通し番号は台帳全体で一続き。行の位置が身体に残るよう、節を跨いでも振り直さない。
+            val numbers = remember(sections) {
+                sections.flatMap { it.second }
+                    .mapIndexed { i, entry -> entry.id to i + 1 }
+                    .toMap()
+            }
+
+            // 編集中は縦の掃きで面を離れない。並べ替えの最中に一覧へ飛ばされると、
+            // 下の方に置いたものへ手が届かなくなる。横のページ送りだけは残す。
+            // 計器盤では掃き上げで一覧へ抜けない。
+            //
+            // あの面は**長く、下まで読む**ためのものなので、巻き終わりに達するたび
+            // 一覧が開くと読むことができない。一覧へは最下端の検索行から入る。
+            val leaveGestures = if (
+                ui.editorMode ||
+                page == Dashboard.PAGE ||
+                page == MusicBoard.page(config.pageCount)
+            ) {
+                Modifier
+            } else {
+                Modifier.nestedScroll(liftToSearch)
+            }
+
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .then(leaveGestures)
+                    .then(
+                        if (
+                            ui.editorMode ||
+                            page == Dashboard.PAGE ||
+                            page == MusicBoard.page(config.pageCount)
+                        ) {
+                            Modifier
+                        } else {
+                            Modifier.pointerInput(Unit) {
+                                var travel = 0f
+                                detectVerticalDragGestures(
+                                    onDragStart = { travel = 0f },
+                                    onDragEnd = { if (travel < -swipeThreshold) onOpenSearch() },
+                                ) { _, amount -> travel += amount }
                             }
+                        }
+                    )
+                    .pointerInput(page) {
+                        // 何も置かれていない場所の長押しで編集へ入る。Androidのホームで
+                        // 最も通りの良い作法で、時計の操作列を知らなくても辿り着ける。
+                        // 行や見出しは自前の長押しを持つので、そちらが先に受け取る。
+                        detectTapGestures(
+                            onLongPress = {
+                                // 計器盤は選ばない面なので、並べ替える対象が無い。
+                                // 編集へ入れると空の編集面に落ちるだけになる。
+                                if (page != Dashboard.PAGE &&
+                                    page != MusicBoard.page(config.pageCount)
+                                ) {
+                                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    ui.clearMenus()
+                                    ui.editorMode = true
+                                }
+                            },
+                            onTap = { if (ui.menusOpen) ui.clearMenus() },
+                        )
+                    }
+            ) {
+                // 上部が起こしうることを一組にまとめて渡す。
+                // 一つずつ引数で配っていた頃は21個まで膨れ、足すたびに三箇所を直していた。
+                val commands = remember(config, page, generations, ui.editorMode, ui.displayMenu) {
+                    HomeCommands(
+                        openClock = { AppRepository.openClock(context) },
+                        toggleEditor = {
+                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                            ui.clearMenus()
+                            ui.editorMode = !ui.editorMode
                         },
-                        onTap = { if (ui.menusOpen) ui.clearMenus() },
+                        toggleMenu = {
+                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                            ui.expandedItem = null
+                            ui.sectionMenu = null
+                            ui.displayMenu = !ui.displayMenu
+                        },
+                        cycleIconSize = {
+                            val sizes = LayoutConfig.ICON_SIZES
+                            val next = sizes[(sizes.indexOf(config.display.iconSize) + 1) % sizes.size]
+                            onCommit(config.withIconSize(next))
+                        },
+                        toggleLabels = { onCommit(config.withLabels(!config.display.showLabels)) },
+                        toggleIconTone = { onCommit(config.withMonoIcons(!config.display.monoIcons)) },
+                        addInfo = {
+                            ui.displayMenu = false
+                            ui.infoPickerOpen = true
+                            ui.editorMode = true
+                        },
+                        addWidget = {
+                            ui.displayMenu = false
+                            ui.widgetPickerOpen = true
+                            ui.editorMode = true
+                        },
+                        addSite = {
+                            ui.clearMenus()
+                            ui.editingSiteId = null
+                            ui.siteEditorOpen = true
+                            ui.editorMode = true
+                        },
+                        addSection = {
+                            val last =
+                                config.sections.lastOrNull { it.page == page }?.title ?: ""
+                            onCommit(config.sectionAdded(last, page))
+                        },
+                        addPage = {
+                            val next = config.pageAdded()
+                            onCommit(next)
+                            ui.page = next.pageCount - 1
+                        },
+                        removePage = {
+                            val removed = page
+                            onCommit(config.pageRemoved(removed))
+                            ui.page = (removed - 1).coerceAtLeast(0)
+                        },
+                        rollback = onRollback,
+                        exportBackup = onExport,
+                        importBackup = onImport,
+                        close = ui::clearAll,
                     )
                 }
-                .windowInsetsPadding(WindowInsets.safeDrawing)
-        ) {
-            // 上部が起こしうることを一組にまとめて渡す。
-            // 一つずつ引数で配っていた頃は21個まで膨れ、足すたびに三箇所を直していた。
-            val commands = remember(config, ui.page, generations, ui.editorMode, ui.displayMenu) {
-                HomeCommands(
-                    openClock = { AppRepository.openClock(context) },
-                    toggleEditor = {
-                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                        ui.clearMenus()
-                        ui.editorMode = !ui.editorMode
-                    },
-                    toggleMenu = {
-                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                        ui.expandedItem = null
-                        ui.sectionMenu = null
-                        ui.displayMenu = !ui.displayMenu
-                    },
-                    cycleIconSize = {
-                        val sizes = LayoutConfig.ICON_SIZES
-                        val next = sizes[(sizes.indexOf(config.display.iconSize) + 1) % sizes.size]
-                        onCommit(config.withIconSize(next))
-                    },
-                    toggleLabels = { onCommit(config.withLabels(!config.display.showLabels)) },
-                    addInfo = {
-                        ui.displayMenu = false
-                        ui.infoPickerOpen = true
-                        ui.editorMode = true
-                    },
-                    addWidget = {
-                        ui.displayMenu = false
-                        ui.widgetPickerOpen = true
-                        ui.editorMode = true
-                    },
-                    addSite = {
-                        ui.clearMenus()
-                        ui.editingSiteId = null
-                        ui.siteEditorOpen = true
-                        ui.editorMode = true
-                    },
-                    addSection = {
-                        val last =
-                            config.sections.lastOrNull { it.page == ui.page }?.title ?: ""
-                        onCommit(config.sectionAdded(last, ui.page))
-                    },
-                    addPage = {
-                        val next = config.pageAdded()
-                        onCommit(next)
-                        ui.page = next.pageCount - 1
-                    },
-                    removePage = {
-                        val page = ui.page
-                        onCommit(config.pageRemoved(page))
-                        ui.page = (page - 1).coerceAtLeast(0)
-                    },
-                    rollback = onRollback,
-                    exportBackup = onExport,
-                    importBackup = onImport,
-                    close = ui::clearAll,
-                )
-            }
 
-            // 置かれた物を動かす指示は、面ごとにばらさず一組で渡す。
-            val tileCommands = remember(config) {
-                TileCommands(
-                    placement = PlacementCommands(
-                        remove = { id -> onCommit(config.infoTileRemoved(id)) },
-                        move = { id, delta -> onCommit(config.infoTileMoved(id, delta)) },
-                        cycleSpan = { id -> onCommit(config.infoTileSpanCycled(id)) },
-                        toggleZone = { id -> onCommit(config.infoTileZoneToggled(id)) },
-                        movePage = { id, delta -> onCommit(config.infoTilePageMoved(id, delta)) },
-                    ),
-                    edit = { ui.editingInfoTile = it },
-                    update = { onCommit(config.infoTileUpdated(it)) },
-                    requestAccess = requestInfoAccess,
-                )
-            }
-            // ウィジェットが申告する「これ未満だと壊れる幅」を、四分割の桁へ言い換える。
-            // 申告を無視して狭い桁へ入れられると、置けるのに中身が潰れる——
-            // **一番分かりにくい壊れ方**なので、選べないようにする。
-            val widgetManager = remember { AppWidgetManager.getInstance(context) }
-            val usableWidthDp = LocalConfiguration.current.screenWidthDp -
-                (ObservatoryDimens.Gutter.value * 2).toInt()
-            val minSpanOf: (Int) -> Int = { id ->
-                val info = runCatching { widgetManager.getAppWidgetInfo(id) }.getOrNull()
-                if (info == null || usableWidthDp <= 0) {
-                    1
-                } else {
-                    val needDp = with(density) {
-                        maxOf(info.minResizeWidth, info.minWidth).toDp().value
-                    }
-                    val column = usableWidthDp.toFloat() / LayoutConfig.WIDGET_MAX_SPAN
-                    ceil(needDp / column).toInt().coerceIn(1, LayoutConfig.WIDGET_MAX_SPAN)
+                // 置かれた物を動かす指示は、面ごとにばらさず一組で渡す。
+                val tileCommands = remember(config) {
+                    TileCommands(
+                        placement = PlacementCommands(
+                            remove = { id -> onCommit(config.infoTileRemoved(id)) },
+                            move = { id, delta -> onCommit(config.infoTileMoved(id, delta)) },
+                            cycleSpan = { id -> onCommit(config.infoTileSpanCycled(id)) },
+                            toggleZone = { id -> onCommit(config.infoTileZoneToggled(id)) },
+                            movePage = { id, delta -> onCommit(config.infoTilePageMoved(id, delta)) },
+                        ),
+                        edit = { ui.editingInfoTile = it },
+                        update = { onCommit(config.infoTileUpdated(it)) },
+                        requestAccess = requestInfoAccess,
+                    )
                 }
-            }
-            val widgetCommands = remember(config, minSpanOf) {
-                WidgetCommands(
-                    placement = PlacementCommands(
-                        remove = { id ->
-                            widgetHost.deleteAppWidgetId(id)
-                            onCommit(config.widgetRemoved(id))
+                // 横向きか。**幅が高さを上回れば横**とみなす——向きの設定値ではなく実寸で見るので、
+                // 分割画面で縦長の窓に入ったときも正しく縦の組み方になる。
+                val landscape = isLandscape()
+                // 横向きで使う巻き。頁を移ったら頭から読めるよう、頁ごとに作り直す。
+                val landscapeScroll = remember(landscape) { ScrollState(0) }
+                // 巻きの余りを親へ渡さない（行き止まりで検索が開かないように）。
+                val keepScrollHere = remember {
+                    object : NestedScrollConnection {
+                        override fun onPostScroll(
+                            consumed: Offset,
+                            available: Offset,
+                            source: NestedScrollSource,
+                        ): Offset = available
+
+                        override suspend fun onPostFling(consumed: Velocity, available: Velocity): Velocity =
+                            available
+                    }
+                }
+
+                // ウィジェットが申告する「これ未満だと壊れる幅」を、四分割の桁へ言い換える。
+                // 申告を無視して狭い桁へ入れられると、置けるのに中身が潰れる——
+                // **一番分かりにくい壊れ方**なので、選べないようにする。
+                val widgetManager = remember { AppWidgetManager.getInstance(context) }
+                // 横向きのホームでは、ウィジェットは左半分に置かれる。
+                val windowDp = windowWidth().value.toInt()
+                val usableWidthDp = (if (landscape) windowDp / 2 else windowDp) -
+                    (ObservatoryDimens.Gutter.value * 2).toInt()
+                val minSpanOf: (Int) -> Int = { id ->
+                    val info = runCatching { widgetManager.getAppWidgetInfo(id) }.getOrNull()
+                    if (info == null || usableWidthDp <= 0) {
+                        1
+                    } else {
+                        val needDp = with(density) {
+                            maxOf(info.minResizeWidth, info.minWidth).toDp().value
+                        }
+                        val column = usableWidthDp.toFloat() / LayoutConfig.WIDGET_MAX_SPAN
+                        ceil(needDp / column).toInt().coerceIn(1, LayoutConfig.WIDGET_MAX_SPAN)
+                    }
+                }
+                val widgetCommands = remember(config, minSpanOf) {
+                    WidgetCommands(
+                        placement = PlacementCommands(
+                            remove = { id ->
+                                widgetHost.deleteAppWidgetId(id)
+                                onCommit(config.widgetRemoved(id))
+                            },
+                            move = { id, delta -> onCommit(config.widgetMoved(id, delta)) },
+                            cycleSpan = { id -> onCommit(config.widgetSpanCycled(id, minSpanOf(id))) },
+                            toggleZone = { id -> onCommit(config.widgetZoneToggled(id)) },
+                            movePage = { id, delta -> onCommit(config.widgetPageMoved(id, delta)) },
+                        ),
+                        cycleHeight = { id -> onCommit(config.widgetHeightCycled(id)) },
+                        setHeight = { id, dp -> onCommit(config.widgetHeightSet(id, dp)) },
+                    )
+                }
+
+                // 面ごとの枠の出し分け。
+                //
+                // - **ホームだけが入口を持つ。** 検索行も掃き上げも、ホームにあれば足りる。
+                //   計器盤と音の面は読むための面なので、入口を置くと画面が削られるだけである。
+                // - **音の面は一枚で完結させる。** 時計も置かない。
+                //   一枚の絵として成り立つことを、この面の第一の条件にする（本人指示・2026/9/1）。
+                val musicPage = MusicBoard.page(config.pageCount)
+                val isMusic = page == musicPage
+                val isDashboard = page == Dashboard.PAGE
+                val showChrome = !isMusic && !isDashboard
+
+                // ---- 面を組む部品 -------------------------------------------------
+                //
+                // 縦と横で**並べ方だけ**を変える。部品の中身は一つしか書かない
+                // ——向きごとに中身を書き分けると、片方だけが古くなる（§8-2）。
+
+                val masthead: @Composable () -> Unit = {
+                    // 面の頭に、12% の燠火帯と名札を置く。
+                    // **三枚とも同じ位置・同じ幅**なので、どの面に居ても
+                    // 「同じ道具の中に居る」ことが形で分かる。
+                    val boardCount = musicPage - Dashboard.PAGE + 1
+                    BoardMasthead(
+                        name = when {
+                            // 面の名は欧文（[Lexicon]）。標語（右）は和文のまま。
+                            isDashboard -> Lexicon.DASHBOARD
+                            isMusic -> Lexicon.SOUND
+                            else -> Lexicon.HOME
                         },
-                        move = { id, delta -> onCommit(config.widgetMoved(id, delta)) },
-                        cycleSpan = { id -> onCommit(config.widgetSpanCycled(id, minSpanOf(id))) },
-                        toggleZone = { id -> onCommit(config.widgetZoneToggled(id)) },
-                        movePage = { id, delta -> onCommit(config.widgetPageMoved(id, delta)) },
-                    ),
-                    cycleHeight = { id -> onCommit(config.widgetHeightCycled(id)) },
-                    setHeight = { id, dp -> onCommit(config.widgetHeightSet(id, dp)) },
-                )
-            }
-
-            // 面ごとの枠の出し分け。
-            //
-            // - **ホームだけが入口を持つ。** 検索行も掃き上げも、ホームにあれば足りる。
-            //   計器盤と音の面は読むための面なので、入口を置くと画面が削られるだけである。
-            // - **音の面は一枚で完結させる。** 時計も置かない。
-            //   一枚の絵として成り立つことを、この面の第一の条件にする（本人指示・2026/9/1）。
-            val musicPage = MusicBoard.page(config.pageCount)
-            val isMusic = ui.page == musicPage
-            val isDashboard = ui.page == Dashboard.PAGE
-            val showChrome = !isMusic && !isDashboard
-
-            // 面の頭に、12% の燠火帯と名札を置く。
-            // **三枚とも同じ位置・同じ幅**なので、どの面に居ても
-            // 「同じ道具の中に居る」ことが形で分かる。
-            val boardCount = musicPage - Dashboard.PAGE + 1
-            BoardMasthead(
-                name = when {
-                    isDashboard -> "計器盤"
-                    isMusic -> "音"
-                    else -> "ホーム"
-                },
-                index = ui.page - Dashboard.PAGE + 1,
-                count = boardCount,
-                right = when {
-                    isDashboard -> "選ばない"
-                    isMusic -> "一枚"
-                    else -> "選ぶ"
-                },
-            )
-
-            if (!isMusic) {
-                Header(
-                    display = config.display,
-                    editorMode = ui.editorMode,
-                    menuOpen = ui.displayMenu,
-                    generations = generations,
-                    pageCount = config.pageCount,
-                    notice = notice,
-                    commands = commands,
-                )
-            }
-
-            // 編集中は札や操作列で面が伸びる。時計と編集の卓は留めたまま、
-            // それより下をまとめて送れるようにする(下の方へ手が届かない状態を作らない)。
-            val editScroll = rememberScrollState()
-            Column(
-                modifier = if (ui.editorMode) {
-                    Modifier.weight(1f).verticalScroll(editScroll)
-                } else {
-                    Modifier.weight(1f)
+                        index = page - Dashboard.PAGE + 1,
+                        count = boardCount,
+                        right = when {
+                            isDashboard -> "選ばない"
+                            isMusic -> "一枚"
+                            else -> "選ぶ"
+                        },
+                    )
                 }
-            ) {
-            if (ui.widgetPickerOpen) {
-                WidgetProviderPicker(
-                    onSelect = { info ->
-                        ui.widgetPickerOpen = false
-                        bindWidget(info)
-                    },
-                    onClose = { ui.widgetPickerOpen = false },
-                )
-            }
-            if (ui.infoPickerOpen) {
-                InfoTilePicker(
-                    onSelect = { item ->
-                        val tile = LayoutConfig.InfoTile(
-                            id = "info:${UUID.randomUUID()}",
-                            kind = item.kind,
-                            page = ui.page,
-                            zone = LayoutConfig.ZONE_ABOVE,
-                            span = if (
-                                item.kind in setOf(
-                                    LayoutConfig.INFO_ALARM,
-                                    LayoutConfig.INFO_BATTERY,
-                                    LayoutConfig.INFO_DATE,
-                                    LayoutConfig.INFO_SOUND,
-                                )
-                            ) 2 else 4,
+                val header: @Composable () -> Unit = {
+                    // ホームの面は計器の上段（[HomeHero]）。面の設定を開いている間と、
+                    // 報せ（notice）を出している間は従来の頭に戻す——操作列と報せはそちらが持つ。
+                    if (instrumentHere && !ui.displayMenu && notice == null) {
+                        HomeHero(
+                            refreshKey = infoPermissionEpoch,
+                            onOpenClock = commands.openClock,
+                            onLongPress = commands.toggleMenu,
                         )
-                        ui.infoPickerOpen = false
-                        if (item.needsEditor) {
-                            ui.editingInfoTile = tile
-                        } else {
-                            onCommit(config.infoTileAdded(tile))
-                        }
-                    },
-                    onClose = { ui.infoPickerOpen = false },
-                )
-            }
-            ui.editingInfoTile?.let { tile ->
-                InfoTileEditor(
-                    tile = tile,
-                    onSave = { edited ->
-                        val next = if (config.infoTiles.any { it.id == edited.id }) {
-                            config.infoTileUpdated(edited)
-                        } else {
-                            config.infoTileAdded(edited)
-                        }
-                        ui.editingInfoTile = null
-                        onCommit(next)
-                    },
-                    onClose = { ui.editingInfoTile = null },
-                )
-            }
-            if (ui.siteEditorOpen) {
-                val existing = config.sites.firstOrNull { it.id == ui.editingSiteId }
-                SiteEditorPanel(
-                    existing = existing,
-                    onSave = { title, location ->
-                        val next = if (existing == null) {
-                            val base = if (config.sections.none { it.page == ui.page }) {
-                                config.sectionAdded("", ui.page)
-                            } else {
-                                config
-                            }
-                            base.siteAdded(
-                                title = title,
-                                location = location,
-                                sectionTitle = base.sections.first {
-                                    it.page == ui.page
-                                }.title,
-                            )
-                        } else {
-                            config.siteUpdated(existing.id, title, location)
-                        }
-                        ui.clearMenus()
-                        onCommit(next)
-                    },
-                    onClose = ui::clearMenus,
-                )
-            }
-            // **札と弦材と持ち物を、ひとまとめにして巻く。**
-            //
-            // ⚠️ 巻きは頁の列（＝掃き上げ＝検索の受け口と同じ節点）に置いても効かない。
-            // 同じ節点に載る指の受け口は先に書いたものから順に見るので、
-            // 順序を入れ替えても検索が先に取り、頁は一切巻けなかった（実機で二度確認）。
-            // **子に置けば、親より先に受ける。**
-            //
-            // ⚠️ さらに、**巻くのは上側の札だけでは足りない。**
-            // 上だけに重みを与えると、下側の札が自然な高さを先に取り、
-            // 残りに上が押し込められる。月の格子が一週分に潰れた（実機・2026/9/1）。
-            // 一つの巻きの中へ全部を入れて、はじめて上下が対等になる。
-            //
-            // 台帳のある頁は台帳自身が巻くので足さない
-            // ——同じ向きの巻きを入れ子にすると、どちらが受けるかが不定になる。
-            val pageScroll = rememberScrollState()
-            Column(
-                modifier = when {
-                    // 音の面は**巻かない**。入る分しか置かないという制約が、
-                    // この面の質を保っている（`MusicBoard` の解説を参照）。
-                    isMusic -> Modifier.weight(1f)
-                    !ui.editorMode && sections.isEmpty() ->
-                        Modifier.weight(1f).verticalScroll(pageScroll)
-                    else -> Modifier
-                },
-            ) {
-            if (ui.page == Dashboard.PAGE) {
-                // 計器盤は選ばない面なので、宣言を読まない。目録から自動で組む。
-                DashboardPage(
-                    pageCount = config.pageCount,
-                    commands = tileCommands,
-                    refreshEpoch = infoPermissionEpoch,
-                    frictionApps = config.frictionApps,
-                )
-            } else if (ui.page == MusicBoard.page(config.pageCount)) {
-                // 音の面。札の仕組みを通さず、音のためだけに手で組む。
-                MusicBoardPage(display = config.display, refreshKey = infoPermissionEpoch)
-            } else {
-            InfoTilePanel(
-                tiles = aboveInfoTiles,
-                pageCount = config.pageCount,
-                editing = ui.editorMode,
-                commands = tileCommands,
-                refreshEpoch = infoPermissionEpoch,
-                frictionApps = config.frictionApps,
-            )
-
-            WidgetPanel(
-                config = config,
-                page = ui.page,
-                zone = LayoutConfig.ZONE_ABOVE,
-                host = widgetHost,
-                editing = ui.editorMode,
-                commands = widgetCommands,
-                modifier = Modifier.padding(top = 8.dp),
-            )
-
-            // 弦材は「大きな区切り」ただ一箇所＝状態(時刻・予定・天気)と台帳の境目にのみ置く。
-            // 節ごとに反復すると§N-7が禁じる「目盛りとの機械的な並置」になる。
-            ObservatoryTruss(
-                modifier = Modifier
-                    .padding(horizontal = ObservatoryDimens.Gutter)
-                    .padding(top = 14.dp)
-            )
-
-            InfoTilePanel(
-                tiles = belowInfoTiles,
-                pageCount = config.pageCount,
-                editing = ui.editorMode,
-                commands = tileCommands,
-                refreshEpoch = infoPermissionEpoch,
-                modifier = Modifier.padding(top = 8.dp),
-            )
-
-            // 弦材と台帳の間はもともと空いていた帯。ここにウィジェットを置く。
-            WidgetPanel(
-                config = config,
-                page = ui.page,
-                zone = LayoutConfig.ZONE_BELOW,
-                host = widgetHost,
-                editing = ui.editorMode,
-                commands = widgetCommands,
-                modifier = Modifier.padding(top = 8.dp),
-            )
-
-            }
-            }
-
-            // 台帳は下寄せ。行数が画面を越えたときだけ勝手にスクロールへ移り、
-            // 最下端の検索行は常に指の届く位置に残る。
-            // 台帳は LazyColumn ではなく素の列にする。
-            // LazyColumn は与えられた高さを必ず埋めるので、台帳の上の空白まで
-            // 一覧の領域になり、そこでの長押し(編集へ入る)や掃き上げ(検索)が
-            // 一覧に吸われて親へ届かない。ホームの台帳は元来小さく、
-            // 遅延生成の利点より入口が塞がらないことの方が重い。
-            Box(
-                modifier = if (ui.editorMode || sections.isEmpty()) {
-                    // 台帳が無い頁で重みを持たせると、空の枠が残りの高さを全部取り、
-                    // その上の札が押し出されて切れる。持たせない。
-                    Modifier.fillMaxWidth()
-                } else {
-                    Modifier.fillMaxWidth().weight(1f)
-                },
-                contentAlignment = Alignment.BottomStart,
-            ) {
-                Column(
-                    modifier = if (ui.editorMode) {
-                        Modifier.fillMaxWidth()
-                    } else {
-                        Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
-                    },
-                ) {
-                sections.forEach { (title, entries) ->
-                    key(title) {
-                        val isRow = config.sections.firstOrNull { it.title == title }?.row == true
-                        GroupHeader(
-                            title = title,
-                            menuOpen = ui.sectionMenu == title,
-                            renaming = ui.renaming == title,
-                            onToggleMenu = {
-                                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                                ui.toggleSection(title)
-                            },
-                            onRename = { name ->
-                                ui.clearMenus()
-                                onCommit(config.renamedSection(title, name))
-                            },
-                            trailing = if (ui.editorMode) {
-                                if (isRow) "横並び" else "縦一列"
-                            } else {
-                                null
-                            },
-                            actions = buildList {
-                                add(LedgerAction("名前を変える") { ui.renaming = title })
-                                add(
-                                    LedgerAction(
-                                        if (isRow) {
-                                            "縦一列に戻す"
-                                        } else {
-                                            "この節のアプリを横並びにする"
-                                        }
-                                    ) { onCommit(config.sectionRowToggled(title)) }
-                                )
-                                add(LedgerAction("この下に節を追加") {
-                                    ui.sectionMenu = null
-                                    onCommit(config.sectionAdded(title))
-                                })
-                                add(LedgerAction("この節を削除") {
-                                    ui.sectionMenu = null
-                                    onCommit(config.sectionRemoved(title))
-                                })
-                                if (generations > 0) {
-                                    add(LedgerAction("元に戻す($generations)") {
-                                        ui.sectionMenu = null
-                                        onRollback()
-                                    })
-                                }
-                                add(LedgerAction("閉じる", ui::clearMenus))
-                            },
+                    } else if (!isMusic) {
+                        Header(
+                            display = config.display,
+                            editorMode = ui.editorMode,
+                            menuOpen = ui.displayMenu,
+                            generations = generations,
+                            pageCount = config.pageCount,
+                            notice = notice,
+                            commands = commands,
                         )
                     }
-                    val isRow = config.sections.firstOrNull { it.title == title }?.row == true
-                    if (isRow) {
-                        key("row:$title") {
-                            IconCluster(
-                                entries = entries.map { item ->
-                                    key(item.id) {
-                                        ClusterItem(
-                                            key = item.id,
-                                            label = item.label,
-                                            icon = rememberHomeIcon(item, iconPx),
-                                            fallbackLabel = if (item is HomeItem.Site) "WEB" else null,
-                                            onMove = if (ui.editorMode) {
-                                                { delta ->
-                                                    haptics.performHapticFeedback(
-                                                        HapticFeedbackType.LongPress
-                                                    )
-                                                    onCommit(
-                                                        if (delta > 0) {
-                                                            liveConfig.movedDown(item.id)
-                                                        } else {
-                                                            liveConfig.movedUp(item.id)
-                                                        }
-                                                    )
-                                                }
-                                            } else {
-                                                null
-                                            },
-                                            onClick = {
-                                                if (ui.editorMode) {
-                                                    haptics.performHapticFeedback(
-                                                        HapticFeedbackType.LongPress
-                                                    )
-                                                    ui.sectionMenu = null
-                                                    ui.displayMenu = false
-                                                    ui.choosing = null
-                                                    ui.expandedItem =
-                                                        if (ui.expandedItem == item.id) null else item.id
-                                                } else if (ui.menusOpen) {
-                                                    ui.clearMenus()
-                                                } else {
-                                                    haptics.performHapticFeedback(
-                                                        HapticFeedbackType.LongPress
-                                                    )
-                                                    openHomeItem(context, item)
-                                                }
-                                            },
-                                            onLongClick = {
-                                                haptics.performHapticFeedback(
-                                                    HapticFeedbackType.LongPress
-                                                )
-                                                ui.toggleItem(item.id)
-                                            },
+                }
+                // 編集の卓（札・ウィジェット・サイトを選ぶ面）。
+                val panels: @Composable () -> Unit = {
+                    if (ui.widgetPickerOpen) {
+                        WidgetProviderPicker(
+                            onSelect = { info ->
+                                ui.widgetPickerOpen = false
+                                bindWidget(info)
+                            },
+                            onClose = { ui.widgetPickerOpen = false },
+                        )
+                    }
+                    if (ui.infoPickerOpen) {
+                        InfoTilePicker(
+                            onSelect = { item ->
+                                val tile = LayoutConfig.InfoTile(
+                                    id = "info:${UUID.randomUUID()}",
+                                    kind = item.kind,
+                                    page = page,
+                                    zone = LayoutConfig.ZONE_ABOVE,
+                                    span = if (
+                                        item.kind in setOf(
+                                            LayoutConfig.INFO_ALARM,
+                                            LayoutConfig.INFO_BATTERY,
+                                            LayoutConfig.INFO_DATE,
+                                            LayoutConfig.INFO_SOUND,
                                         )
-                                    }
-                                },
-                                display = config.display,
-                            )
-                        }
-                        val open = entries.firstOrNull { it.id == ui.expandedItem }
-                        if (open != null) {
-                            key("rowact:$title") {
-                                val openApp = open as? HomeItem.App
-                                val openShortcuts = rememberShortcuts(
-                                    packageName = openApp?.entry?.packageName,
-                                    user = openApp?.entry?.user,
-                                    enabled = !ui.editorMode,
+                                    ) 2 else 4,
                                 )
-                                ActionStrip(
-                                    rowActions(
-                                        config, open, ui.choosing, context,
-                                        onCommit, ui::clearMenus,
-                                        shortcuts = openShortcuts,
-                                        onShortcut = { shortcut ->
-                                            ui.clearMenus()
-                                            AppRepository.startShortcut(context, shortcut)
-                                        },
-                                        onEditSite = { site ->
-                                            ui.clearMenus()
-                                            ui.editingSiteId = site.id
-                                            ui.siteEditorOpen = true
-                                            ui.editorMode = true
-                                        },
-                                    ) { ui.choosing = it }
-                                )
-                            }
-                        }
-                    } else {
-                        entries.forEach { item ->
-                            key(item.id) {
-                                val number = numbers[item.id] ?: 0
-                                // 編集中は長押ししてから引くと、行そのものが指について動く。
-                                // 一行分を越えるたびに入れ替え、越えた分だけ見かけを戻す
-                                // ——「上へ」「下へ」を何度も押さずに済む。
-                                // アプリが備える近道(長押しで出るあれ)。編集中は出さない
-                                // ——並べ替えの最中に別の面へ飛ぶ入口を混ぜない。
-                                val app = item as? HomeItem.App
-                                val shortcuts = rememberShortcuts(
-                                    packageName = app?.entry?.packageName,
-                                    user = app?.entry?.user,
-                                    enabled = ui.expandedItem == item.id && !ui.editorMode,
-                                )
-                                var drag by remember(item.id) { mutableFloatStateOf(0f) }
-                                val dragModifier = if (ui.editorMode) {
-                                    Modifier
-                                        .graphicsLayer { translationY = drag }
-                                        .pointerInput(item.id) {
-                                            detectDragGestures(
-                                                onDragEnd = { drag = 0f },
-                                                onDragCancel = { drag = 0f },
-                                            ) { change, amount ->
-                                                change.consume()
-                                                drag += amount.y
-                                                if (drag > rowHeightPx) {
-                                                    haptics.performHapticFeedback(
-                                                        HapticFeedbackType.LongPress
-                                                    )
-                                                    onCommit(liveConfig.movedDown(item.id))
-                                                    drag -= rowHeightPx
-                                                } else if (drag < -rowHeightPx) {
-                                                    haptics.performHapticFeedback(
-                                                        HapticFeedbackType.LongPress
-                                                    )
-                                                    onCommit(liveConfig.movedUp(item.id))
-                                                    drag += rowHeightPx
-                                                }
-                                            }
-                                        }
+                                ui.infoPickerOpen = false
+                                if (item.needsEditor) {
+                                    ui.editingInfoTile = tile
                                 } else {
-                                    Modifier
+                                    onCommit(config.infoTileAdded(tile))
                                 }
-                                AppRow(
-                                    dragModifier = dragModifier,
-                                    label = item.label,
-                                    icon = rememberHomeIcon(item, iconPx),
-                                    fallbackLabel = if (item is HomeItem.Site) "WEB" else null,
-                                    display = config.display,
-                                    number = number,
-                                    index = (number - 1).coerceAtLeast(0),
-                                    highlighted = ui.expandedItem == item.id,
-                                    expanded = ui.expandedItem == item.id,
-                                    onClick = {
-                                        if (ui.editorMode) {
-                                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                                            ui.toggleItem(item.id)
-                                        } else if (ui.menusOpen) {
-                                            ui.clearMenus()
-                                        } else {
-                                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                                            openHomeItem(context, item)
-                                        }
-                                    },
-                                    onLongClick = {
-                                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                                        ui.toggleItem(item.id)
-                                    },
-                                    // 開いている行だけ組む。台帳は十数行だが、
-                                    // 一覧と同じ理由で、描くもの以外は作らない。
-                                    actions = if (ui.expandedItem != item.id) {
-                                        emptyList()
-                                    } else rowActions(
-                                        config, item, ui.choosing, context, onCommit, ui::clearMenus,
-                                        shortcuts = shortcuts,
-                                        onShortcut = { shortcut ->
-                                            ui.clearMenus()
-                                            AppRepository.startShortcut(context, shortcut)
-                                        },
-                                        onEditSite = { site ->
-                                            ui.clearMenus()
-                                            ui.editingSiteId = site.id
-                                            ui.siteEditorOpen = true
-                                            ui.editorMode = true
-                                        },
-                                    ) { ui.choosing = it },
-                                )
-                            }
-                        }
+                            },
+                            onClose = { ui.infoPickerOpen = false },
+                        )
                     }
-                }
-                // **この頁に何も無いときだけ**出す。節が無いだけで出していたので、
-                // 情報の札しか置いていない頁で「台帳は空」と言い続けていた。
-                // 案内は行き先が要るときにだけ出るべきで、
-                // 既に何かが見えている面で出すと、ただの誤りになる。
-                // 計器盤は宣言を読まないので、宣言の上では常に空に見える。
-                // だが面には情報が並んでいるし、そもそもアプリを足す場所ではない。
-                val pageIsBare = ui.page != Dashboard.PAGE &&
-                    ui.page != MusicBoard.page(config.pageCount) &&
-                    sections.isEmpty() &&
-                    aboveInfoTiles.isEmpty() &&
-                    belowInfoTiles.isEmpty() &&
-                    config.widgets.none { it.page == ui.page }
-                if (pageIsBare) {
-                    key("empty") {
-                        ObservatoryText(
-                            text = "台帳は空。検索からアプリを追加するか、編集からサイトを追加する。",
-                            color = ObservatoryColors.Muted,
-                            size = ObservatoryType.Body,
-                            modifier = Modifier
-                                .heightIn(min = ObservatoryDimens.Row)
-                                .padding(horizontal = ObservatoryDimens.Gutter),
+                    ui.editingInfoTile?.let { tile ->
+                        InfoTileEditor(
+                            tile = tile,
+                            onSave = { edited ->
+                                val next = if (config.infoTiles.any { it.id == edited.id }) {
+                                    config.infoTileUpdated(edited)
+                                } else {
+                                    config.infoTileAdded(edited)
+                                }
+                                ui.editingInfoTile = null
+                                onCommit(next)
+                            },
+                            onClose = { ui.editingInfoTile = null },
+                        )
+                    }
+                    if (ui.siteEditorOpen) {
+                        val existing = config.sites.firstOrNull { it.id == ui.editingSiteId }
+                        SiteEditorPanel(
+                            existing = existing,
+                            onSave = { title, location ->
+                                val next = if (existing == null) {
+                                    val base = if (config.sections.none { it.page == page }) {
+                                        config.sectionAdded("", page)
+                                    } else {
+                                        config
+                                    }
+                                    base.siteAdded(
+                                        title = title,
+                                        location = location,
+                                        sectionTitle = base.sections.first {
+                                            it.page == page
+                                        }.title,
+                                    )
+                                } else {
+                                    config.siteUpdated(existing.id, title, location)
+                                }
+                                ui.clearMenus()
+                                onCommit(next)
+                            },
+                            onClose = ui::clearMenus,
                         )
                     }
                 }
-            }
-            }
+                val pageBody: @Composable () -> Unit = {
+                    if (page == Dashboard.PAGE) {
+                        // 計器盤は選ばない面なので、宣言を読まない。目録から自動で組む。
+                        DashboardPage(
+                            pageCount = config.pageCount,
+                            // 横向きは幅が倍近くあるので、節を二列に流す。
+                            columns = if (landscape) 2 else 1,
+                            commands = tileCommands,
+                            refreshEpoch = infoPermissionEpoch,
+                            frictionApps = config.frictionApps,
+                        )
+                    } else if (page == MusicBoard.page(config.pageCount)) {
+                        // 音の面。札の仕組みを通さず、音のためだけに手で組む。
+                        MusicBoardPage(display = config.display, refreshKey = infoPermissionEpoch)
+                    } else {
+                    InfoTilePanel(
+                        tiles = aboveInfoTiles,
+                        pageCount = config.pageCount,
+                        editing = ui.editorMode,
+                        commands = tileCommands,
+                        refreshEpoch = infoPermissionEpoch,
+                        frictionApps = config.frictionApps,
+                    )
 
-            }
+                    WidgetPanel(
+                        config = config,
+                        page = page,
+                        zone = LayoutConfig.ZONE_ABOVE,
+                        host = widgetHost,
+                        editing = ui.editorMode,
+                        commands = widgetCommands,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
 
-            // 節点は計器盤と音の面のぶんを足して数える。
-            // 左端が計器盤、右端が音、その間が利用者の頁である。
-            PageNavigator(
-                page = ui.page - Dashboard.PAGE,
-                count = MusicBoard.page(config.pageCount) - Dashboard.PAGE + 1,
-                onPrevious = { if (ui.page > Dashboard.PAGE) ui.page -= 1 },
-                onNext = {
-                    if (ui.page < MusicBoard.page(config.pageCount)) ui.page += 1
+                    // 弦材は「大きな区切り」ただ一箇所＝状態(時刻・予定・天気)と台帳の境目にのみ置く。
+                    // 節ごとに反復すると§N-7が禁じる「目盛りとの機械的な並置」になる。
+                    // 計器を出している面では、一日の帯（[HomeHorizon]）が区切りを兼ねるので置かない。
+                    if (!instrumentHere) {
+                        ObservatoryTruss(
+                            modifier = Modifier
+                                .padding(horizontal = ObservatoryDimens.Gutter)
+                                .padding(top = 14.dp)
+                        )
+                    }
+
+                    InfoTilePanel(
+                        tiles = belowInfoTiles,
+                        pageCount = config.pageCount,
+                        editing = ui.editorMode,
+                        commands = tileCommands,
+                        refreshEpoch = infoPermissionEpoch,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+
+                    // 弦材と台帳の間はもともと空いていた帯。ここにウィジェットを置く。
+                    WidgetPanel(
+                        config = config,
+                        page = page,
+                        zone = LayoutConfig.ZONE_BELOW,
+                        host = widgetHost,
+                        editing = ui.editorMode,
+                        commands = widgetCommands,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+
+                    }
+                }
+                val ledger: @Composable (Modifier, Boolean) -> Unit = { ledgerModifier, ledgerScrolls ->
+                    HomeLedger(
+                        modifier = ledgerModifier,
+                        scrolls = ledgerScrolls,
+                        page = page,
+                        config = config,
+                        latestConfig = { liveConfig },
+                        sections = sections,
+                        numbers = numbers,
+                        aboveInfoTiles = aboveInfoTiles,
+                        belowInfoTiles = belowInfoTiles,
+                        ui = ui,
+                        generations = generations,
+                        iconPx = iconPx,
+                        rowHeightPx = rowHeightPx,
+                        badges = badges,
+                        onCommit = onCommit,
+                        onRollback = onRollback,
+                        // 縦向きのホームでは、一日の帯と計器の列を台帳の直上（親指の届く帯）に置く。
+                        lead = if (instrumentHere && !landscape) {
+                            { HomeHorizon(refreshKey = infoPermissionEpoch) }
+                        } else {
+                            null
+                        },
+                    )
+                }
+                val footer: @Composable () -> Unit = {
+                    // 節点は計器盤と音の面のぶんを足して数える。
+                    // 左端が計器盤、右端が音、その間が利用者の頁である。
+                    //
+                    // 縦向きでは印を面の外（画面）に留めるので（[PagerIndicator]）、
+                    // ここには同じ高さの空きだけを残す。横向きは面ごとに左右の組みが違い、
+                    // 留める位置が一つに決まらないので、面の中に置いたままにする。
+                    if (landscape) {
+                        PageNavigator(
+                            page = page - Dashboard.PAGE,
+                            count = MusicBoard.page(config.pageCount) - Dashboard.PAGE + 1,
+                            onPrevious = { if (page > Dashboard.PAGE) ui.page = page - 1 },
+                            onNext = {
+                                if (page < MusicBoard.page(config.pageCount)) ui.page = page + 1
+                            },
+                        )
+                    } else {
+                        Spacer(modifier = Modifier.height(ObservatoryDimens.Row))
+                    }
+                    // 検索行はホームだけ。読むための面から画面を削らない。
+                    if (showChrome) CommandBar(onOpenSearch = onOpenSearch, onStartTyping = onStartTyping)
+                }
+
+                if (!landscape) {
+                    masthead()
+                    header()
+                    // 編集中は札や操作列で面が伸びる。時計と編集の卓は留めたまま、
+                    // それより下をまとめて送れるようにする(下の方へ手が届かない状態を作らない)。
+                    val editScroll = rememberScrollState()
+                    Column(
+                        modifier = if (ui.editorMode) {
+                            Modifier.weight(1f).scrollEdge(editScroll).verticalScroll(editScroll)
+                        } else {
+                            Modifier.weight(1f)
+                        }
+                    ) {
+                        panels()
+                        // **札と弦材と持ち物を、ひとまとめにして巻く。**
+                        //
+                        // ⚠️ 巻きは頁の列（＝掃き上げ＝検索の受け口と同じ節点）に置いても効かない。
+                        // 同じ節点に載る指の受け口は先に書いたものから順に見るので、
+                        // 順序を入れ替えても検索が先に取り、頁は一切巻けなかった（実機で二度確認）。
+                        // **子に置けば、親より先に受ける。**
+                        //
+                        // ⚠️ さらに、**巻くのは上側の札だけでは足りない。**
+                        // 上だけに重みを与えると、下側の札が自然な高さを先に取り、
+                        // 残りに上が押し込められる。月の格子が一週分に潰れた（実機・2026/9/1）。
+                        // 一つの巻きの中へ全部を入れて、はじめて上下が対等になる。
+                        //
+                        // 台帳のある頁は台帳自身が巻くので足さない
+                        // ——同じ向きの巻きを入れ子にすると、どちらが受けるかが不定になる。
+                        val pageScroll = rememberScrollState()
+                        Column(
+                            modifier = when {
+                                // 音の面は**巻かない**。入る分しか置かないという制約が、
+                                // この面の質を保っている（`MusicBoard` の解説を参照）。
+                                isMusic -> Modifier.weight(1f)
+                                !ui.editorMode && sections.isEmpty() ->
+                                    Modifier.weight(1f).scrollEdge(pageScroll).verticalScroll(pageScroll)
+                                else -> Modifier
+                            },
+                        ) {
+                            pageBody()
+                        }
+                        ledger(
+                            if (ui.editorMode || sections.isEmpty()) {
+                                // 台帳が無い頁で重みを持たせると、空の枠が残りの高さを全部取り、
+                                // その上の札が押し出されて切れる。持たせない。
+                                Modifier.fillMaxWidth()
+                            } else {
+                                Modifier.fillMaxWidth().weight(1f)
+                            },
+                            // 編集中は外側の巻き（editScroll）が受け持つ。
+                            !ui.editorMode,
+                        )
+                    }
+                    footer()
+                } else {
+                    // ## 横向き（2026/9/25）
+                    //
+                    // > 「横画面にした時にも使いやすくしたいので横画面でも作業できるように
+                    // >  全面的に改修してください」（本人）
+                    //
+                    // 横向きは**高さが縦向きの半分に満たない**（Pixel 8a で約 360dp）。
+                    // 縦の一列をそのまま寝かせると、時計と札だけで画面が埋まり台帳に届かない。
+                    // だから面ごとに、**左右へ分けられるものは分ける。**
+                    //
+                    // - ホーム：左に時計と札（巻く）、右に台帳と検索行。親指の届く右側に入口を置く
+                    // - 計器盤：時計ごと一枚で巻き、節は二列に流す（[DashboardPage] の columns）
+                    // - 音の面：面の中で左右に分ける（[MusicBoardPage]）
+                    masthead()
+                    when {
+                        isMusic -> {
+                            Column(modifier = Modifier.weight(1f).fillMaxWidth()) { pageBody() }
+                            footer()
+                        }
+                        isDashboard -> {
+                            Column(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .fillMaxWidth()
+                                    // 名札と巻く領域の間を空ける。空けないと、巻いた中身が
+                                    // 名札の行に接して詰まって見えた（実機・2026/9/25）。
+                                    .padding(top = 8.dp)
+                                    .scrollEdge(landscapeScroll)
+                                    .verticalScroll(landscapeScroll),
+                            ) {
+                                // 横向きの計器盤には時計を置かない。高さが縦向きの半分しかなく、
+                                // 時刻はステータスバーにもある（本人・2026-09-25「これいるのか」）。
+                                pageBody()
+                            }
+                            footer()
+                        }
+                        else -> Row(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                            // ## 横向きのホームは三列（計器を出している面）
+                            //
+                            // 二列では、左（時計・予定・一日の帯・計器）が高さに収まらず帯が切れ、
+                            // 右（台帳）の上は空いていた（実機・2026-09-25）。
+                            // **左に今（時計・次の行動）、中央に一日（帯・計器）、右に道具（台帳）**。
+                            Column(
+                                modifier = Modifier
+                                    .weight(if (instrumentHere) 1.25f else 1f)
+                                    .fillMaxHeight()
+                                    .padding(top = 8.dp)
+                                    .scrollEdge(landscapeScroll)
+                                    // 左の巻きが行き止まっても検索を開かない。
+                                    // 札を読み終えるたびに一覧が開いては読めない。
+                                    .nestedScroll(keepScrollHere)
+                                    .verticalScroll(landscapeScroll),
+                            ) {
+                                header()
+                                panels()
+                                pageBody()
+                            }
+                            if (instrumentHere) {
+                                Column(
+                                    modifier = Modifier.weight(1f).fillMaxHeight(),
+                                    verticalArrangement = Arrangement.Center,
+                                ) {
+                                    HomeHorizon(refreshKey = infoPermissionEpoch)
+                                }
+                            }
+                            Column(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                                ledger(Modifier.fillMaxWidth().weight(1f), true)
+                                footer()
+                            }
+                        }
+                    }
+                }
+            }
+            }
+        }
+
+        if (!isLandscape()) {
+            PagerIndicator(
+                pager = pager,
+                // 利用者の頁（ホーム）だけは下に検索行があり、印はその上に在る。
+                lift = { index ->
+                    val at = index + Dashboard.PAGE
+                    if (at != Dashboard.PAGE && at != MusicBoard.page(config.pageCount)) {
+                        CommandBarHeight
+                    } else {
+                        0.dp
+                    }
                 },
+                onSelect = { index -> ui.page = index + Dashboard.PAGE },
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .windowInsetsPadding(WindowInsets.safeDrawing),
             )
-            // 検索行はホームだけ。読むための面から画面を削らない。
-            if (showChrome) CommandBar(onOpenSearch = onOpenSearch)
         }
     }
 }

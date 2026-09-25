@@ -1,5 +1,24 @@
 package com.yuma.observatorylauncher.ui
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.pager.PagerState
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.offset
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
+import kotlin.math.PI
+import kotlin.math.floor
+import kotlin.math.sin
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -30,6 +49,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.yuma.observatorylauncher.config.LayoutConfig
@@ -42,7 +62,7 @@ import java.util.Locale
 import kotlin.math.abs
 import kotlinx.coroutines.delay
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.repeatOnLifecycle
 /*
@@ -99,10 +119,9 @@ internal fun Header(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .pressFade(interaction)
                 .combinedClickable(
                     interactionSource = interaction,
-                    indication = null,
+                    indication = PressIndication.Row,
                     // 押せば時計アプリへ。長押しで編集の操作列が開く。
                     // 時刻は最も押しやすい場所にあるので、そこを設定の入口に
                     // 独占させない(まず時計として使えること)。
@@ -123,18 +142,21 @@ internal fun Header(
                 // だから時分は 52sp のまま、秒は一段落として添える。
                 // 下端を揃えるので、数字の列としては一続きに読める。
                 Row(verticalAlignment = Alignment.Bottom) {
-                    ObservatoryText(
-                        clock,
-                        ObservatoryColors.Paper,
-                        52.sp,
-                        mono = true,
-                        tracking = 0f,
+                    // 時計は Regular で組む。大きな数字の既定（SemiBold）では、
+                    // 52sp の四桁が面の上で塊になり重い。細くしすぎると
+                    // にじんだ画面で痩せるので、Light までは下げない。
+                    RollingText(
+                        text = clock,
+                        color = ObservatoryColors.Paper,
+                        size = 52.sp,
+                        tracking = -0.01f,
+                        weight = FontWeight.Normal,
                     )
-                    ObservatoryText(
-                        ":$seconds",
-                        ObservatoryColors.Muted,
-                        ObservatoryType.Value,
-                        mono = true,
+                    // 秒は**桁ごとに回って**替わる（[RollingText]）。
+                    RollingText(
+                        text = ":$seconds",
+                        color = ObservatoryColors.Muted,
+                        size = ObservatoryType.Value,
                         tracking = 0f,
                         modifier = Modifier.padding(start = 4.dp, bottom = 6.dp),
                     )
@@ -142,7 +164,7 @@ internal fun Header(
                 ObservatoryText(
                     date,
                     ObservatoryColors.Muted,
-                    12.sp,
+                    ObservatoryType.Note,
                     mono = true,
                     tracking = 0.12f,
                 )
@@ -166,6 +188,10 @@ internal fun Header(
                         if (display.showLabels) "アプリ名：表示" else "アプリ名：非表示",
                         commands.toggleLabels,
                     ),
+                    LedgerAction(
+                        if (display.monoIcons) "アイコン：単色" else "アイコン：原色",
+                        commands.toggleIconTone,
+                    ),
                     LedgerAction("控えを書き出す", commands.exportBackup),
                     LedgerAction("控えから戻す", commands.importBackup),
                     LedgerAction("閉じる", commands.close),
@@ -187,7 +213,7 @@ internal fun Header(
                         .background(ObservatoryColors.Ember)
                 )
                 Spacer(modifier = Modifier.width(10.dp))
-                ObservatoryText(notice, ObservatoryColors.EmberText, 12.sp)
+                ObservatoryText(notice, ObservatoryColors.EmberText, ObservatoryType.Note)
             }
         }
         if (editorMode) {
@@ -240,10 +266,9 @@ internal fun EditorBar(
             Box(
                 modifier = Modifier
                     .heightIn(min = 36.dp)
-                    .pressFade(interaction)
                     .combinedClickable(
                         interactionSource = interaction,
-                        indication = null,
+                        indication = PressIndication.Row,
                         onClick = commands.toggleEditor,
                     )
                     .padding(start = 12.dp),
@@ -273,6 +298,12 @@ internal fun EditorBar(
                     LedgerAction(
                         if (display.showLabels) "アプリ名：表示" else "アプリ名：非表示",
                         commands.toggleLabels,
+                    )
+                )
+                add(
+                    LedgerAction(
+                        if (display.monoIcons) "アイコン：単色" else "アイコン：原色",
+                        commands.toggleIconTone,
                     )
                 )
                 if (generations > 0) {
@@ -349,7 +380,7 @@ internal fun PageNavigator(
                     .size(ObservatoryDimens.Row)
                     .combinedClickable(
                         interactionSource = interaction,
-                        indication = null,
+                        indication = PressIndication.Row,
                         enabled = at != page,
                         // 隣へ移るのが常なので、前後の指示をそのまま使う。
                         // 二枚を超える面は今のところ想定していない。
@@ -375,7 +406,11 @@ internal fun PageNavigator(
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-internal fun CommandBar(onOpenSearch: () -> Unit) {
+internal fun CommandBar(
+    onOpenSearch: () -> Unit,
+    /** 行を押したとき。**押すのは打つ意思**なので、鍵盤を出して開く。 */
+    onStartTyping: () -> Unit = onOpenSearch,
+) {
     val barInteraction = remember { MutableInteractionSource() }
     Column(
         modifier = Modifier.pointerInput(Unit) {
@@ -398,11 +433,10 @@ internal fun CommandBar(onOpenSearch: () -> Unit) {
             modifier = Modifier
                 .fillMaxWidth()
                 .height(ObservatoryDimens.Row + 8.dp)
-                .pressFade(barInteraction)
                 .combinedClickable(
                     interactionSource = barInteraction,
-                    indication = null,
-                    onClick = onOpenSearch,
+                    indication = PressIndication.Row,
+                    onClick = onStartTyping,
                 )
                 .padding(horizontal = ObservatoryDimens.Gutter),
             verticalAlignment = Alignment.CenterVertically,
@@ -430,3 +464,76 @@ internal fun CommandBar(onOpenSearch: () -> Unit) {
  * 一度でも前を掴むと、次の待ちはまた丸一拍ぶんになり、**そのままずれ続ける**。
  */
 private const val TICK_MARGIN_MS = 40L
+
+/** 検索行の高さ（罫＋行）。頁の印をホームでこの分だけ持ち上げる（[PagerIndicator]）。 */
+internal val CommandBarHeight = ObservatoryDimens.Hairline + ObservatoryDimens.Row + 8.dp
+
+/**
+ * 頁の印（縦向き）。**面と一緒に流れず、画面に留まる。**
+ *
+ * 面が指に付いて滑るようになったので（2026-09-25）、印を面の中に置くと
+ * 掃いている間に二組の印が流れて見えた。印は画面に留め、
+ * **塗った四角だけが指の位置に合わせて移る**。移る途中は四角が少し横へ伸びる
+ * ——丸めずに伸ばすので、直角の語彙のまま「動いている」ことが分かる。
+ *
+ * @param lift 面ごとの、下端から印までの高さ。ホームは検索行の上に印があるので、
+ *   面の間を滑る間は高さも滑らかにつなぐ（印が跳ねない）。
+ */
+@Composable
+internal fun PagerIndicator(
+    pager: PagerState,
+    lift: (Int) -> Dp,
+    onSelect: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val count = pager.pageCount
+    if (count <= 1) return
+    val density = LocalDensity.current
+    val slot = ObservatoryDimens.Row
+    fun position(): Float = (pager.currentPage + pager.currentPageOffsetFraction).coerceIn(0f, (count - 1).toFloat())
+    Row(
+        modifier = modifier
+            .offset {
+                val at = position()
+                val from = floor(at).toInt()
+                val to = (from + 1).coerceAtMost(count - 1)
+                val f = at - from
+                val y = lift(from) + (lift(to) - lift(from)) * f
+                IntOffset(0, -with(density) { y.roundToPx() })
+            }
+            .fillMaxWidth()
+            .height(slot)
+            .drawWithContent {
+                drawContent()
+                val at = position()
+                val start = (size.width - slot.toPx() * count) / 2f
+                val cx = start + slot.toPx() * (at + 0.5f)
+                val travel = at - floor(at)
+                val side = 7.dp.toPx()
+                val stretch = 8.dp.toPx() * sin(PI.toFloat() * travel)
+                drawRect(
+                    ObservatoryColors.Paper,
+                    topLeft = Offset(cx - (side + stretch) / 2f, (size.height - side) / 2f),
+                    size = Size(side + stretch, side),
+                )
+            },
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center,
+    ) {
+        repeat(count) { at ->
+            val interaction = remember(at) { MutableInteractionSource() }
+            Box(
+                modifier = Modifier
+                    .size(slot)
+                    .clickable(
+                        interactionSource = interaction,
+                        indication = null,
+                        onClick = { onSelect(at) },
+                    ),
+                contentAlignment = Alignment.Center,
+            ) {
+                Box(modifier = Modifier.size(5.dp).background(ObservatoryColors.Line))
+            }
+        }
+    }
+}

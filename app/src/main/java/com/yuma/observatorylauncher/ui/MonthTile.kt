@@ -217,10 +217,10 @@ private fun Step(label: String, onClick: () -> Unit) {
         modifier = Modifier
             .heightIn(min = ObservatoryDimens.Row)
             .widthIn(min = ObservatoryDimens.Row)
-            .clickable(interactionSource = interaction, indication = null, onClick = onClick),
+            .clickable(interactionSource = interaction, indication = PressIndication.Item, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        ObservatoryText(text = label, color = ObservatoryColors.Muted, size = 13.sp)
+        ObservatoryText(text = label, color = ObservatoryColors.Muted, size = ObservatoryType.Note)
     }
 }
 
@@ -252,7 +252,7 @@ private fun DayCell(
         // **刻みがどの週のものか**が読めなくなる。
         modifier = modifier
             .aspectRatio(1.55f)
-            .clickable(interactionSource = interaction, indication = null, onClick = onOpen)
+            .clickable(interactionSource = interaction, indication = PressIndication.Item, onClick = onOpen)
             .padding(vertical = 3.dp),
     ) {
         // 今日は**形**で示す。

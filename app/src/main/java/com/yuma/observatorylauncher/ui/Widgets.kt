@@ -258,7 +258,7 @@ fun WidgetProviderPicker(
                     .heightIn(min = ObservatoryDimens.Row)
                     .combinedClickable(
                         interactionSource = closeInteraction,
-                        indication = null,
+                        indication = PressIndication.Row,
                         onClick = onClose,
                     )
                     .padding(start = 12.dp),
@@ -274,7 +274,7 @@ fun WidgetProviderPicker(
             textStyle = TextStyle(
                 color = ObservatoryColors.Paper,
                 fontSize = 14.sp,
-                fontFamily = FontFamily.SansSerif,
+                fontFamily = ObservatoryFonts.Sans,
             ),
             cursorBrush = SolidColor(ObservatoryColors.Ember),
             modifier = Modifier
@@ -331,7 +331,7 @@ fun WidgetProviderPicker(
                         .heightIn(min = ObservatoryDimens.Row)
                         .combinedClickable(
                             interactionSource = interaction,
-                            indication = null,
+                            indication = PressIndication.Row,
                             onClick = { onSelect(info) },
                         ),
                     verticalAlignment = Alignment.CenterVertically,
@@ -443,7 +443,7 @@ private fun WidgetCell(
                 .heightIn(min = ObservatoryDimens.Row)
                 .combinedClickable(
                     interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
+                    indication = PressIndication.Row,
                     onClick = { commands.placement.remove(widget.id) },
                 )
                 .padding(vertical = 8.dp),

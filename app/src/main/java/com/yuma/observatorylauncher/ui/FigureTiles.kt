@@ -48,7 +48,10 @@ internal fun TimelineTile(modifier: Modifier = Modifier, refreshKey: Int = 0) {
     // 直近の予定を別に並べていた頃はそちらが受け持っていたが、
     // 同じ予定を二箇所に書くのをやめたので、ここが引き受ける。
     val ahead by produceState<Appointment?>(null, refreshKey) {
-        value = Glance.appointments(context, limit = 4).firstOrNull()
+        // ⚠️ **始まっているものは「次」ではない。** 数日続く期間（履修登録期間など）は
+        // 始まりが過去のまま一覧の先頭に居続け、「次 9/24 00:00 …」と出ていた（2026-09-25）。
+        val at = System.currentTimeMillis()
+        value = Glance.appointments(context, limit = 6).firstOrNull { it.begin > at }
     }
     val now = System.currentTimeMillis()
     val zone = remember { ZoneId.systemDefault() }
@@ -130,8 +133,7 @@ internal fun TimelineTile(modifier: Modifier = Modifier, refreshKey: Int = 0) {
             outside > 0 && nextOutside != null ->
                 "今日あと $outside 件　次 " + clockOf(nextOutside.begin) + " " + nextOutside.title
             outside > 0 -> "今日あと $outside 件"
-            ahead != null -> "次 " + ahead!!.dayLabel(now) + " " +
-                ahead!!.timeLabel() + " " + ahead!!.title
+            ahead != null -> ahead?.let { "次 " + it.dayLabel(now) + " " + it.timeLabel() + " " + it.title }
             else -> null
         }
         footer?.let {
@@ -213,6 +215,7 @@ internal fun UsageBarsTile(modifier: Modifier = Modifier, refreshKey: Int = 0, t
             format = { readableMinutes(it) },
             axis = true,
             axisLabel = { "%d分".format((it / 60_000).toInt()) },
+            tickUnit = TICK_MINUTE,
         )
     }
 }
@@ -288,6 +291,7 @@ internal fun TrafficTile(modifier: Modifier = Modifier, refreshKey: Int = 0, top
                 format = { readableBytes(it) },
                 axis = true,
                 axisLabel = { readableBytes(it.toLong()) },
+                tickUnit = byteTickUnit((names.maxOfOrNull { it.value } ?: 1L).toFloat()),
             )
         }
     }
@@ -369,27 +373,31 @@ internal fun ChargeTile(modifier: Modifier = Modifier, refreshKey: Int = 0) {
                 size = ObservatoryType.Note,
             )
             Spacer(modifier = Modifier.weight(1f))
-            // 電流と電力を右へ。**この札の主題はここ**なので、大きさを揃えて並べる。
-            ObservatoryText(
-                text = Charge.ampLabel(now.milliAmp),
-                color = ObservatoryColors.Paper,
-                size = ObservatoryType.Body,
-                mono = true,
-            )
-            Spacer(modifier = Modifier.padding(horizontal = 4.dp))
-            ObservatoryText(
-                text = Charge.wattLabel(now.watt),
-                color = ObservatoryColors.Muted,
-                size = ObservatoryType.Note,
-                mono = true,
-            )
+            // 電流と電力は**充電しているときだけ**右へ（充電器の速さを見るためのもの）。
+            // 満充電や放電中の「+3mA 0.0W」は何も答えないので出さない（本人・2026-09-25
+            // 「これいるのか？という情報は省略または小さく」）。
+            if (now.charging && now.percent < 100) {
+                ObservatoryText(
+                    text = Charge.ampLabel(now.milliAmp),
+                    color = ObservatoryColors.Paper,
+                    size = ObservatoryType.Body,
+                    mono = true,
+                )
+                Spacer(modifier = Modifier.padding(horizontal = 4.dp))
+                ObservatoryText(
+                    text = Charge.wattLabel(now.watt),
+                    color = ObservatoryColors.Muted,
+                    size = ObservatoryType.Note,
+                    mono = true,
+                )
+            }
         }
         // 添えの値。**単位を必ず書く**——裸の数字は読む側に前提を要求する。
         ObservatoryText(
             text = buildList {
-                now.volt?.let { add("%.2fV".format(it)) }
+                // 電圧（V）と電荷（mAh）は外した——日々の判断に使わない値である。温度は残す
+                // （熱いまま充電していないかは、端末を労わる判断に要る）。
                 now.celsius?.let { add("%.1f℃".format(it)) }
-                now.chargeMah?.let { add("${it}mAh") }
                 // 「約」を付ける。直線の見積りなので、終盤は実際より短く出る。
                 now.toFullMs?.let {
                     add((if (now.charging) "満まで約" else "空まで約") + readableMinutes(it))
@@ -416,7 +424,7 @@ internal fun ChargeTile(modifier: Modifier = Modifier, refreshKey: Int = 0) {
     }
 }
 
-private fun clockOf(at: Long): String =
+internal fun clockOf(at: Long): String =
     java.text.SimpleDateFormat("HH:mm", java.util.Locale.JAPAN).format(java.util.Date(at))
 
 /**
@@ -489,6 +497,7 @@ internal fun SpaceTile(modifier: Modifier = Modifier, refreshKey: Int = 0) {
                 format = { readableBytes(it) },
                 axis = true,
                 axisLabel = { readableBytes(it.toLong()) },
+                tickUnit = byteTickUnit((data.ranked.maxOfOrNull { it.second } ?: 1L).toFloat()),
             )
         }
     }
@@ -532,14 +541,16 @@ internal fun TouchTile(modifier: Modifier = Modifier, refreshKey: Int = 0) {
         }
         Spacer(modifier = Modifier.weight(1f))
         // 一日の輪郭。**最初と最後だけ**でよい——間の全部を書いても輪郭は太くならない。
+        // 二行に分ける。半分の幅の札で一行に並べると「最後…」と切れた（2026/9/25）。
         ObservatoryText(
             text = listOfNotNull(
                 data.firstAt?.let { "最初 " + clockOf(it) },
                 data.lastAt?.let { "最後 " + clockOf(it) },
-            ).joinToString("  "),
+            ).joinToString("\n"),
             color = ObservatoryColors.Muted,
             size = ObservatoryType.Note,
             mono = true,
+            maxLines = 2,
         )
     }
 }
@@ -561,12 +572,15 @@ internal fun WeatherSeriesTile(modifier: Modifier = Modifier, refreshKey: Int = 
     val w = weather ?: return
     if (w.hours.size < 4) return
     Column(modifier = modifier.fillMaxWidth()) {
+        // 軸は固定（[FixedAxis] の注記）。降水確率 0〜100%・気温 −10〜40℃。
         SeriesFigure(
             labels = w.hours,
             bars = w.hourlyRain.map { it.toFloat() },
             barUnit = "降水確率 %",
+            barAxis = FixedAxis.PERCENT,
             line = w.hourlyTemp.map { it.toFloat() },
             lineUnit = "気温 ℃",
+            lineAxis = FixedAxis.TEMPERATURE,
         )
         // 図から読み取れることを一行だけ言葉にする。
         // **図は形を見せ、言葉は結論を置く**——どちらか片方では届かない。
@@ -574,7 +588,8 @@ internal fun WeatherSeriesTile(modifier: Modifier = Modifier, refreshKey: Int = 
         val summary = when {
             peak == null -> null
             peak.value < 20 -> "この先12時間、降水確率は低いまま"
-            else -> "最も高いのは ${w.hours[peak.index]}時の ${peak.value}%"
+            // 気象庁の降水確率は 6 時間ごとの区間なので、「何時からの」と書く。
+            else -> "最も高いのは ${w.hours[peak.index]}時からの ${peak.value}%"
         }
         summary?.let {
             ObservatoryText(
@@ -592,9 +607,10 @@ internal fun WeatherSeriesTile(modifier: Modifier = Modifier, refreshKey: Int = 
                 labels = w.hours,
                 bars = w.hourlyHumidity.map { it.toFloat() },
                 barUnit = "湿度 %",
+                barAxis = FixedAxis.PERCENT,
                 line = w.hourlyPressure.map { it.toFloat() },
                 lineUnit = if (w.hourlyPressure.isEmpty()) "" else "気圧 hPa",
-                height = 72.dp,
+                lineAxis = FixedAxis.PRESSURE,
             )
         }
     }
@@ -625,7 +641,7 @@ internal fun NextActionTile(modifier: Modifier = Modifier, refreshKey: Int = 0) 
     val upcoming by produceState(initialValue = emptyList<Appointment>(), refreshKey) {
         value = Glance.appointments(context, limit = 6)
     }
-    val ahead = upcoming.firstOrNull()
+    val ahead = upcoming.firstOrNull { it.begin > System.currentTimeMillis() }
     val now = System.currentTimeMillis()
     val timed = today?.first.orEmpty()
 
@@ -726,7 +742,7 @@ internal fun NextActionTile(modifier: Modifier = Modifier, refreshKey: Int = 0) 
 }
 
 /** 残り時間を読む形へ。**一時間を超えたら分は丸める**——分単位の精度は要らない。 */
-private fun gap(millis: Long): String {
+internal fun gap(millis: Long): String {
     val minutes = (millis / 60_000).coerceAtLeast(0)
     return when {
         minutes < 60 -> "${minutes}分"
@@ -837,6 +853,7 @@ internal fun AttentionTile(
             labels = days.map { weekdayOf(it.start) },
             values = perDay.map { it.toFloat() },
             format = { "%d分".format((it / 60_000).toInt()) },
+            tickUnit = TICK_MINUTE,
         )
         ObservatoryText(
             text = "七日平均 " + readableMinutes(
@@ -885,6 +902,7 @@ internal fun SpreadTile(modifier: Modifier = Modifier, refreshKey: Int = 0) {
         BoxPlotFigure(
             summary = five,
             format = { "%d分".format((it / 60_000).toInt()) },
+            tickUnit = TICK_MINUTE,
         )
     }
 }
@@ -910,6 +928,7 @@ internal fun TrafficWeekTile(modifier: Modifier = Modifier, refreshKey: Int = 0)
             labels = days.map { weekdayOf(it.first) },
             values = days.map { it.second.toFloat() },
             format = { readableBytes(it.toLong()) },
+            tickUnit = byteTickUnit(days.maxOfOrNull { it.second.toFloat() } ?: 1f),
         )
     }
 }
@@ -1099,6 +1118,7 @@ internal fun DayShapeTile(modifier: Modifier = Modifier, refreshKey: Int = 0) {
             labels = (0 until 8).map { "%02d".format(it * 3) },
             values = bins.map { it.toFloat() },
             format = { "%d分".format((it / 60_000).toInt()) },
+            tickUnit = TICK_MINUTE,
             hot = peak?.index ?: -1,
         )
         a.longest?.let { s ->
@@ -1292,6 +1312,7 @@ internal fun ListeningTile(modifier: Modifier = Modifier, refreshKey: Int = 0) {
                 format = { readableMinutes(it) },
                 axis = true,
                 axisLabel = { "${(it / 60_000).toInt()}分" },
+                tickUnit = TICK_MINUTE,
                 modifier = Modifier.padding(top = 10.dp),
             )
         }

@@ -219,4 +219,46 @@ class ListeningTest {
         val open = listOf(Listening.Play(1L, "a", "x", "app", 1000L))
         assertEquals(false, Listening.parse(Listening.format(open))[0].hidden)
     }
+
+    // ── 記録してよいアプリ（2026/9/25） ─────────────────────
+
+    @Test
+    fun `音楽のアプリだけが残る`() {
+        val plays = listOf(
+            Listening.Play(1L, "a", "x", "com.apple.android.music", 1000L),
+            Listening.Play(2L, "b", "x", "com.google.android.apps.youtube.music", 1000L),
+            Listening.Play(3L, "c", "x", "com.google.android.youtube", 1000L),
+            Listening.Play(4L, "d", "x", "com.android.chrome", 1000L),
+            Listening.Play(5L, "e", "x", "", 1000L),
+        )
+        assertEquals(listOf("a", "b"), Listening.fromSources(plays).map { it.title })
+    }
+
+    @Test
+    fun `時刻別の分布は期間を絞ってから数える`() {
+        // 八日前の一曲は、七日で切れば時刻の枡へ入らない。
+        val now = t0 + 10L * 24 * 60 * 60_000
+        val old = play(now - 8L * 24 * 60 * 60_000, "old", duration = 60_000L)
+        val fresh = play(now - 60_000L, "new", duration = 60_000L)
+        val all = Listening.byHour(listOf(old, fresh), now).sum()
+        val week = Listening.byHour(Listening.within(listOf(old, fresh), 7, now), now).sum()
+        assertEquals(120_000L, all)
+        assertEquals(60_000L, week)
+    }
+
+    /** 曲の途中で止めて再開しても、**一曲は一曲**。 */
+    @Test
+    fun `一時停止から再開しても二曲に数えない`() {
+        val first = play(t0, "a", duration = 240_000L)
+        val resumed = play(t0 + 120_000L, "a", duration = 240_000L)
+        assertEquals(1, Listening.appended(listOf(first), resumed).size)
+    }
+
+    /** 最後まで聴いてもう一度かけたら、二回目として数える（一曲リピート）。 */
+    @Test
+    fun `聴き終えてもう一度かけた曲は数え直す`() {
+        val first = play(t0, "a", duration = 240_000L)
+        val again = play(t0 + 240_000L, "a", duration = 240_000L)
+        assertEquals(2, Listening.appended(listOf(first), again).size)
+    }
 }

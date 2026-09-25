@@ -200,7 +200,7 @@ private fun PanelAction(label: String, hot: Boolean, onClick: () -> Unit) {
             .heightIn(min = ObservatoryDimens.Row)
             .clickable(
                 interactionSource = interaction,
-                indication = null,
+                indication = PressIndication.Item,
                 onClick = onClick,
             ),
         contentAlignment = Alignment.Center,

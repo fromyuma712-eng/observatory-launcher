@@ -24,6 +24,7 @@ import android.os.Build
 import android.os.CancellationSignal
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.coroutines.resume
 import androidx.annotation.RequiresApi
 import android.location.Geocoder
 
@@ -88,6 +89,8 @@ data class Weather(
      * 画面に出ていなかった（本人の指摘・2026/9/2）。
      */
     val place: String = "",
+    /** 値の出所（「気温 ○○（アメダス）で補正・降水 気象庁」）。空なら Open-Meteo のみ。 */
+    val source: String = "",
     // ここから下は詳細の札だけが使う。同じ一度の問い合わせで一緒に受け取る——
     // 詳細のために二度目を投げるのは、送る回数を増やすだけで何の得も無い。
     val apparent: Double? = null,
@@ -241,7 +244,7 @@ object Glance {
                 // 時系列。**二日ぶん取って今から先だけを使う**——
                 // 一日ぶんだと夜には残りが数点になり、線が引けない。
                 "&hourly=temperature_2m,precipitation_probability," +
-                "relative_humidity_2m,surface_pressure" +
+                "relative_humidity_2m,pressure_msl" +
                 "&timezone=Asia%2FTokyo&forecast_days=2"
         )
         runCatching {
@@ -278,7 +281,12 @@ object Glance {
                 sunrise = clock("sunrise"),
                 sunset = clock("sunset"),
             ).withSeries(root.optJSONObject("hourly"))
-        }.getOrNull()?.also { cached = it }
+        }.getOrNull()
+            ?.let { base ->
+                // 日本の中では、気象庁の実測と公式の予報を重ねる（[Jma] の注記）。
+                if (Jma.inJapan(point.first, point.second)) withJma(context, base, point) else base
+            }
+            ?.also { cached = it }
     }
 
     /**
@@ -290,6 +298,59 @@ object Glance {
      *
      * 一件でも欠けたら図を出さない。**歯抜けの時系列は、無いより悪い。**
      */
+    /**
+     * 気象庁の値を重ねる。**今の気温・湿度はアメダスの実測、降水確率と今日の天気は公式の予報。**
+     *
+     * 降水の見出しは「今日これからの最大」（区間の終わりが今より後で、始まりが今日のうち）。
+     * 一日の最大のままだと、夜に見ても朝の値が出る。今日が尽きていれば次の区間を出す。
+     * 毎時の棒は、その時刻を含む 6 時間の区間の値を置く（気象庁が出すのは 6 時間ごとの値だけ）。
+     */
+    private fun withJma(context: Context, w: Weather, point: Pair<Double, Double>): Weather {
+        val obs = Jma.observation(context, point.first, point.second)
+        val fc = Jma.forecast(context, point.first, point.second)
+        if (obs == null && fc == null) return w
+        var out = w
+        obs?.let { o ->
+            // 毎時の気温（モデル）を実測に寄せる。**今の差を足し、先の時間ほど薄める**（6 時間で約 1/e）。
+            // 寄せないと、見出しは実測 27°・図の線はモデルの 23° から始まり、同じ面で食い違う。
+            val bias = o.temperature - out.temperature
+            val corrected = out.hourlyTemp.mapIndexed { i, t -> t + bias * kotlin.math.exp(-i / 6.0) }
+            out = out.copy(
+                hourlyTemp = corrected,
+                temperature = o.temperature,
+                humidity = o.humidity ?: out.humidity,
+                // 実測が予報の幅を越えたら、幅の方を広げる（「26° 18–25°」のような食い違いを出さない）。
+                high = maxOf(out.high, o.temperature),
+                low = minOf(out.low, o.temperature),
+            )
+        }
+        fc?.let { f ->
+            val now = System.currentTimeMillis()
+            val sixHours = 6 * 3_600_000L
+            val tomorrow = java.time.LocalDate.now(java.time.ZoneId.of("Asia/Tokyo")).plusDays(1)
+                .atStartOfDay(java.time.ZoneId.of("Asia/Tokyo")).toInstant().toEpochMilli()
+            val blocks = f.pops.map { (start, pop) -> Triple(start, start + sixHours, pop) }
+            val headline = blocks.filter { it.second > now && it.first < tomorrow }.maxOfOrNull { it.third }
+                ?: blocks.firstOrNull { it.second > now }?.third
+            val hourStart = now - now % 3_600_000L
+            val hourly = out.hours.indices.map { i ->
+                val t = hourStart + i * 3_600_000L + 1_800_000L
+                blocks.firstOrNull { t >= it.first && t < it.second }?.third ?: out.hourlyRain.getOrElse(i) { 0 }
+            }
+            out = out.copy(
+                precipitation = headline ?: out.precipitation,
+                skyToday = f.weatherToday.ifBlank { out.skyToday },
+                hourlyRain = if (out.hours.isEmpty()) out.hourlyRain else hourly,
+            )
+        }
+        return out.copy(
+            source = listOfNotNull(
+                obs?.let { "気温 ${it.station}（アメダス）で補正" },
+                fc?.let { "降水 気象庁" },
+            ).joinToString("・"),
+        )
+    }
+
     private fun Weather.withSeries(hourly: JSONObject?): Weather {
         if (hourly == null) return this
         val times = hourly.optJSONArray("time") ?: return this
@@ -304,7 +365,8 @@ object Glance {
         // 湿度と気圧は**在れば添える**。無くても天気の図は成り立つので、
         // ここで欠けを理由に全体を落とさない。
         val hums = hourly.optJSONArray("relative_humidity_2m")
-        val press = hourly.optJSONArray("surface_pressure")
+        // 海面気圧。地表気圧は標高のぶん低く出て、天気図・予報の値と揃わない（2026-09-25）。
+        val press = hourly.optJSONArray("pressure_msl")
         val hours = ArrayList<String>()
         val t = ArrayList<Double>()
         val r = ArrayList<Int>()
@@ -446,7 +508,7 @@ object Glance {
                 .maxByOrNull { it.time }
         }.getOrNull()
         val fresh = last != null && System.currentTimeMillis() - last.time < FIX_STALE_MS
-        if (fresh) return last!!.latitude to last.longitude
+        if (fresh && last != null) return last.latitude to last.longitude
 
         // 古い（または無い）ので、一度だけ測り直しを頼む。
         // ⚠️ 測り直しを頼む道（`getCurrentLocation`）は API 30 から。
@@ -500,8 +562,8 @@ object Glance {
                         provider,
                         signal,
                         ContextCompat.getMainExecutor(context),
-                    ) { location -> if (cont.isActive) cont.resume(location) {} }
-                }.onFailure { if (cont.isActive) cont.resume(null) {} }
+                    ) { location -> if (cont.isActive) cont.resume(location) }
+                }.onFailure { if (cont.isActive) cont.resume(null) }
             }
         }
     }

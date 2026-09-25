@@ -21,6 +21,9 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.TextUnit
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.yuma.observatorylauncher.ui.theme.ObservatoryColors
@@ -140,8 +143,7 @@ fun TimelineFigure(
             )
         }
         Row(modifier = Modifier.fillMaxWidth()) {
-            BoxWithConstraints(modifier = Modifier.weight(1f)) {
-                val span = maxWidth
+            Box(modifier = Modifier.weight(1f)) {
                 // 目盛り。三時間ごとに長刻み、一時間ごとに短刻み。
                 Box(
                     modifier = Modifier
@@ -181,20 +183,16 @@ fun TimelineFigure(
                 )
                 // 時刻の見出しは**刻みと同じ位置**へ置く。
                 // 等間隔に配ると、軸の右端が半端な時刻のときに見出しだけがずれる。
-                Box(modifier = Modifier.fillMaxWidth().padding(top = 16.dp)) {
-                    for (h in startHour..endHour) {
-                        val f = at(dayStart + h * hourMs)
-                        ObservatoryText(
-                            // **字を小さくしすぎない。** 9sp では読めないという指摘を受けた。
-                            // 図の見出しは装飾ではなく、軸を読むための唯一の手掛かりである。
-                            text = "%02d".format(h % 24),
-                            color = ObservatoryColors.Muted,
-                            size = ObservatoryType.Note,
-                            mono = true,
-                            modifier = Modifier.offset(x = span * f - 8.dp),
-                        )
-                    }
-                }
+                // **字を小さくしすぎない。** 9sp では読めないという指摘を受けた。
+                // 図の見出しは装飾ではなく、軸を読むための唯一の手掛かりである。
+                AxisLabels(
+                    marks = (startHour..endHour).map { h ->
+                        at(dayStart + h * hourMs) to "%02d".format(h % 24)
+                    },
+                    color = ObservatoryColors.Muted,
+                    size = ObservatoryType.Note,
+                    modifier = Modifier.padding(top = 16.dp),
+                )
             }
             Spacer(modifier = Modifier.width(nameGap))
             Spacer(modifier = Modifier.width(nameWidth))
@@ -304,6 +302,8 @@ fun BarsFigure(
     axis: Boolean = false,
     /** 軸の刻みに添える単位の書き方。 */
     axisLabel: (Float) -> String = { format(it.toLong()) },
+    /** 目盛りを刻む単位（[TICK_MINUTE] など）。刻みの「きりの良さ」は表示の単位で決める。 */
+    tickUnit: Float = 1f,
 ) {
     if (items.isEmpty()) return
     val top = max.coerceAtLeast(1L)
@@ -317,8 +317,12 @@ fun BarsFigure(
     //
     // 軸を敷くときは、棒も目盛りも**目盛りの天井**で割る。
     // 軸が無いときは最大値のままでよい——あちらは長さの比べ合いで、絶対量を読ませない。
-    val ticks = remember(top) { niceTicks(0f, top.toFloat(), 3) }
+    val ticks = remember(top, tickUnit) { niceTicksIn(top.toFloat(), tickUnit) }
     val ceiling = if (axis) ticks.last().coerceAtLeast(top.toFloat()) else top.toFloat()
+
+    // **値の列は固定幅**（下の注記）。ただし幅は見積らず、いちばん長い値を測って決める。
+    val valueWidth = measureLabels(items.map { format(it.value) }).widest + 1.dp
+    val reveal = rememberReveal()
 
     Column(modifier = modifier.fillMaxWidth()) {
         items.forEachIndexed { index, item ->
@@ -342,7 +346,7 @@ fun BarsFigure(
                             val h = 3.dp.toPx()
                             // 全体の幅を薄い罫で先に引く。**分母が見えないと割合が読めない。**
                             drawRect(
-                                ObservatoryColors.Faint,
+                                ObservatoryColors.Grid,
                                 Offset(0f, midY - 0.5.dp.toPx()),
                                 Size(size.width, 1.dp.toPx()),
                             )
@@ -355,7 +359,7 @@ fun BarsFigure(
                             drawRect(
                                 ink,
                                 Offset(0f, midY - h / 2),
-                                Size(size.width * share, h),
+                                Size(size.width * share * reveal.value, h),
                             )
                         },
                 )
@@ -367,7 +371,7 @@ fun BarsFigure(
                     color = ObservatoryColors.Muted,
                     size = ObservatoryType.Label,
                     mono = true,
-                    modifier = Modifier.width(VALUE_WIDTH),
+                    modifier = Modifier.width(valueWidth),
                 )
             }
         }
@@ -379,8 +383,7 @@ fun BarsFigure(
                 verticalAlignment = Alignment.Top,
             ) {
                 Spacer(modifier = Modifier.width(96.dp))
-                BoxWithConstraints(modifier = Modifier.weight(1f).height(30.dp)) {
-                    val span = maxWidth
+                Column(modifier = Modifier.weight(1f)) {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -406,27 +409,14 @@ fun BarsFigure(
                     // ⚠️ **高さを明示する。** `offset` は測る大きさを変えないので、
                     // 器の高さが刻みの線(5dp)のままだと、数字は場所を持てずに消える。
                     // 実機で軸の線だけが出て数字が出なかった（2026/9/1）。
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(top = 6.dp)
-                            // ⚠️ 字の大きさは利用者の設定で変わる。**9sp ぶんの高さを
-                            // 決め打ちにすると、拡大設定の端末で数字が縦に切れる**（実機で切れた）。
-                            .height(18.dp),
-                    ) {
-                        ticks.forEach { v: Float ->
-                            ObservatoryText(
-                                text = axisLabel(v),
-                                color = ObservatoryColors.Faint,
-                                size = ObservatoryType.Label,
-                                mono = true,
-                                modifier = Modifier.offset(x = span * (v / ceiling) - 8.dp),
-                            )
-                        }
-                    }
+                    // 高さは字を測って決める——拡大設定の端末で数字が縦に切れた（実機）。
+                    AxisLabels(
+                        marks = ticks.map { v -> (v / ceiling) to axisLabel(v) },
+                        modifier = Modifier.padding(top = 6.dp),
+                    )
                 }
                 Spacer(modifier = Modifier.width(8.dp))
-                Spacer(modifier = Modifier.width(VALUE_WIDTH))
+                Spacer(modifier = Modifier.width(valueWidth))
             }
             Spacer(modifier = Modifier.height(14.dp))
         }
@@ -434,7 +424,6 @@ fun BarsFigure(
 }
 
 /** 横棒の右に置く値の列の幅。軸の帯もこれと同じだけ空ける。 */
-private val VALUE_WIDTH = 52.dp
 
 /**
  * 推移。折れ線と格点で描く。
@@ -459,23 +448,17 @@ fun TrendFigure(
     val low = values.min()
     val high = values.max()
     val range = (high - low).takeIf { it > 0f } ?: 1f
+    val reveal = rememberReveal()
     Column(modifier = modifier.fillMaxWidth()) {
       Row(modifier = Modifier.fillMaxWidth()) {
         // 左の値軸。**線と同じ式で置く**（等間隔に並べると線とずれる）。
         if (axisUnit != null) {
-            Box(modifier = Modifier.width(26.dp).height(height)) {
-                listOf(high, low).forEach { v ->
-                    ObservatoryText(
-                        text = "%.0f".format(v),
-                        color = ObservatoryColors.Faint,
-                        size = ObservatoryType.Label,
-                        mono = true,
-                        modifier = Modifier
-                            .align(Alignment.TopEnd)
-                            .offset(y = height * (1f - (v - low) / range) - 6.dp),
-                    )
-                }
-            }
+            ValueAxis(
+                ticks = listOf(high, low).map { v ->
+                    (1f - (v - low) / range) to "%.0f".format(v)
+                },
+                height = height,
+            )
             Spacer(modifier = Modifier.width(4.dp))
         }
         Box(
@@ -485,21 +468,21 @@ fun TrendFigure(
                 .drawBehind {
                     val hair = 1.dp.toPx()
                     // 上下の弦。値の幅がここに収まっていることを示す。
-                    drawRect(ObservatoryColors.Faint, Offset(0f, 0f), Size(size.width, hair))
+                    drawRect(ObservatoryColors.Grid, Offset(0f, 0f), Size(size.width, hair))
                     drawRect(
-                        ObservatoryColors.Faint,
+                        ObservatoryColors.Grid,
                         Offset(0f, size.height - hair),
                         Size(size.width, hair),
                     )
                     val step = size.width / (values.size - 1)
                     fun y(v: Float) = size.height - ((v - low) / range) * size.height
+                    val drawn = (values.size - 1) * reveal.value
                     for (i in 0 until values.size - 1) {
-                        drawLine(
-                            color = ink,
-                            start = Offset(i * step, y(values[i])),
-                            end = Offset((i + 1) * step, y(values[i + 1])),
-                            strokeWidth = hair,
-                        )
+                        val part = (drawn - i).coerceIn(0f, 1f)
+                        if (part <= 0f) break
+                        val a = Offset(i * step, y(values[i]))
+                        val b = Offset((i + 1) * step, y(values[i + 1]))
+                        drawLine(color = ink, start = a, end = a + (b - a) * part, strokeWidth = hair)
                     }
                     // 格点。最後の一つだけ燠火——**それが「今」である**。
                     values.forEachIndexed { i, v ->
@@ -605,13 +588,15 @@ fun BoxPlotFigure(
     format: (Float) -> String,
     modifier: Modifier = Modifier,
     ceiling: Float = summary.max,
+    /** 目盛りを刻む単位。[BarsFigure] と同じ。 */
+    tickUnit: Float = 1f,
 ) {
-    val top = ceiling.coerceAtLeast(1f)
-    val ticks = remember(top) { niceTicks(0f, top, 3) }
+    val ticks = remember(ceiling, tickUnit) { niceTicksIn(ceiling, tickUnit) }
+    // 天井は最後の目盛り。**箱も目盛りも同じ天井で割る**（[BarsFigure] の注記）。
+    val top = ticks.last().coerceAtLeast(ceiling).coerceAtLeast(1f)
     val ink = ObservatoryColors.Muted
     Column(modifier = modifier.fillMaxWidth()) {
-        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-            val span = maxWidth
+        Box(modifier = Modifier.fillMaxWidth()) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -622,7 +607,7 @@ fun BoxPlotFigure(
                         val midY = size.height / 2
                         ticks.forEach { v ->
                             drawRect(
-                                ObservatoryColors.Faint,
+                                ObservatoryColors.Grid,
                                 Offset(x(v), 0f),
                                 Size(hair, size.height),
                             )
@@ -659,17 +644,10 @@ fun BoxPlotFigure(
                         )
                     },
             )
-            Box(modifier = Modifier.fillMaxWidth().padding(top = 36.dp).height(16.dp)) {
-                ticks.forEach { v ->
-                    ObservatoryText(
-                        text = format(v),
-                        color = ObservatoryColors.Faint,
-                        size = ObservatoryType.Label,
-                        mono = true,
-                        modifier = Modifier.offset(x = span * (v / top) - 10.dp),
-                    )
-                }
-            }
+            AxisLabels(
+                marks = ticks.map { v -> (v / top) to format(v) },
+                modifier = Modifier.padding(top = 36.dp),
+            )
         }
         // ⚠️ **器の高さは既に刻みの分を含んでいる。**
         // `BoxWithConstraints` の高さは中で最も背の高い子（＝刻みの帯 36+16dp）で決まるので、
@@ -693,25 +671,21 @@ fun ColumnsFigure(
     height: androidx.compose.ui.unit.Dp = 84.dp,
     /** 強調する位置（今日など）。 */
     hot: Int = values.lastIndex,
+    /** 目盛りを刻む単位。[BarsFigure] と同じ。 */
+    tickUnit: Float = 1f,
 ) {
     if (values.isEmpty() || labels.size != values.size) return
-    val ticks = remember(values) { niceTicks(0f, values.max().coerceAtLeast(1f), 3) }
+    val ticks = remember(values, tickUnit) { niceTicksIn(values.max(), tickUnit) }
     val ceiling = ticks.last().coerceAtLeast(values.max()).coerceAtLeast(1f)
+    val axisTexts = ticks.map(format)
+    val axisWidth = valueAxisWidth(axisTexts)
+    val reveal = rememberReveal()
     Column(modifier = modifier.fillMaxWidth()) {
         Row(modifier = Modifier.fillMaxWidth()) {
-            Box(modifier = Modifier.width(34.dp).height(height)) {
-                ticks.forEach { v ->
-                    ObservatoryText(
-                        text = format(v),
-                        color = ObservatoryColors.Faint,
-                        size = ObservatoryType.Label,
-                        mono = true,
-                        modifier = Modifier
-                            .align(Alignment.TopEnd)
-                            .offset(y = height * (1f - v / ceiling) - 6.dp),
-                    )
-                }
-            }
+            ValueAxis(
+                ticks = ticks.mapIndexed { i, v -> (1f - v / ceiling) to axisTexts[i] },
+                height = height,
+            )
             Spacer(modifier = Modifier.width(4.dp))
             Box(
                 modifier = Modifier
@@ -721,7 +695,7 @@ fun ColumnsFigure(
                         val hair = 1.dp.toPx()
                         ticks.forEach { v ->
                             val y = size.height * (1f - v / ceiling)
-                            drawRect(ObservatoryColors.Faint, Offset(0f, y), Size(size.width, hair))
+                            drawRect(ObservatoryColors.Grid, Offset(0f, y), Size(size.width, hair))
                         }
                         drawRect(
                             ObservatoryColors.LineStrong,
@@ -736,7 +710,7 @@ fun ColumnsFigure(
                         val slot = size.width / values.size
                         val w = (slot * 0.46f).coerceAtMost(14.dp.toPx())
                         values.forEachIndexed { i, v ->
-                            val h = size.height * (v / ceiling)
+                            val h = size.height * (v / ceiling) * reveal.value
                             if (h > 0f) {
                                 drawRect(
                                     if (i == hot) {
@@ -752,7 +726,9 @@ fun ColumnsFigure(
                     },
             )
         }
-        Row(modifier = Modifier.fillMaxWidth().padding(start = 38.dp, top = 3.dp)) {
+        // 下の見出しは軸の幅＋間（4dp）だけ右から始める。**決め打ちの 38dp で寄せていた**ので、
+        // 軸の字が長いと見出しが棒とずれた。
+        Row(modifier = Modifier.fillMaxWidth().padding(start = axisWidth + 4.dp, top = 3.dp)) {
             labels.forEachIndexed { i, text ->
                 Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
                     ObservatoryText(
@@ -939,6 +915,31 @@ internal fun niceTicks(low: Float, high: Float, count: Int = 4): List<Float> {
 }
 
 /**
+ * 表示の単位で刻む目盛り。値そのものの単位で返す。
+ *
+ * ## ⚠️ 刻みの「きりの良さ」は、表示の単位で決めなければならない（2026/9/25）
+ *
+ * 使用時間はミリ秒で持っている。ミリ秒のまま [niceTicks] に掛けると
+ * 「2,500,000 ミリ秒」刻みになり、分に直すと **0・41・83・125 分**という
+ * 読めない目盛りが出ていた（五数要約は 0・166・333・500 分）。
+ * バイトも同じで、10 進の刻みを 1024 進で書くと「238.4MB」になる。
+ *
+ * 表示の単位へ割ってから刻み、刻んだ値を元の単位へ戻す。
+ */
+internal fun niceTicksIn(max: Float, unit: Float = 1f, count: Int = 3): List<Float> =
+    niceTicks(0f, (max / unit).coerceAtLeast(1f), count).map { it * unit }
+
+/** 一分（ミリ秒）。使用時間・聴取時間の目盛りに使う。 */
+internal const val TICK_MINUTE = 60_000f
+
+/** バイト数を刻む単位。最大値に合わせて KB・MB・GB のいずれかで刻む。 */
+internal fun byteTickUnit(max: Float): Float {
+    var unit = 1f
+    while (max / unit >= 1024f && unit < 1024f * 1024f * 1024f) unit *= 1024f
+    return unit
+}
+
+/**
  * 目盛りの数字。桁数は**軸ごとに決める**。
  *
  * ⚠️ **桁の大きい値をそのまま書くと欄から溢れる。**
@@ -965,19 +966,54 @@ private fun tickDecimals(ticks: List<Float>): Int {
     return 2
 }
 
-/**
- * 目盛りの欄に要る幅。
- *
- * **固定幅にすると、桁の多い系列で切れる。**
- * 等幅で置いているので、字数から要る幅が決まる。
- */
-private fun tickWidth(ticks: List<Float>, decimals: Int, min: Dp = 26.dp): Dp {
-    val longest = ticks.maxOfOrNull { formatTick(it, decimals).length } ?: 0
-    return maxOf(min, (longest * TICK_CHAR_DP).dp)
-}
 
-/** 等幅 10sp の一字ぶん（字間 +0.04 を含む見積り）。 */
-private const val TICK_CHAR_DP = 6.6f
+/**
+ * 固定の軸。**値がどうであれ、目盛りは動かさない。**
+ *
+ * @param low 下端。
+ * @param high 上端。
+ * @param step 刻み。(high - low) を割り切る値にする。
+ */
+data class FixedAxis(val low: Float, val high: Float, val step: Float) {
+    val ticks: List<Float>
+        get() = generateSequence(low) { it + step }
+            .takeWhile { it <= high + step / 1000f }
+            .toList()
+
+    /** 下端から測った割合（0〜1）。軸の外の値は端に留める。 */
+    fun fraction(v: Float): Float = ((v - low) / (high - low)).coerceIn(0f, 1f)
+
+    companion object {
+        /**
+         * 降水確率・湿度。**百分率は 0〜100 以外の軸を持ってはならない。**
+         *
+         * > 「降水確率と気温の分布ですが、数値が固定でないので見た時にだまされます。
+         * >  降水確率は100％固定で」（本人・2026/9/25）
+         *
+         * 最大値に合わせて伸縮させていたので、30% の山が図の天井まで届き、
+         * **一目では 90% と見分けがつかなかった。**
+         */
+        val PERCENT = FixedAxis(0f, 100f, 20f)
+
+        /**
+         * 気温。**雨温図の気温軸にならい、10℃刻みで固定する。**
+         *
+         * > 「気温は日本の雨温図で採用されている温度軸とかにしてください」（本人・2026/9/25）
+         *
+         * 教科書の雨温図は月平均を描くので −20〜30℃ が多いが、ここは**一時間ごとの実測**を
+         * 描く。大阪の夏は 38℃ を超えるので上端を 40℃ まで伸ばし、下端は −10℃ とした。
+         * 刻みの数（五つ）を [PERCENT] と揃えてあるので、**二つの軸の目盛り線が重なる**
+         * ——雨温図が左右の軸を一組の罫で読ませているのと同じ作りである。
+         */
+        val TEMPERATURE = FixedAxis(-10f, 40f, 10f)
+
+        /**
+         * 気圧。平地で普段とる幅（おおよそ 1000〜1025hPa）を真ん中に置く。
+         * 台風の中心のように 980 を割る値は下端に留まる。刻みの数は [PERCENT] と揃える。
+         */
+        val PRESSURE = FixedAxis(980f, 1030f, 10f)
+    }
+}
 
 /**
  * 時系列の図。**棒と線を同じ時間軸に重ねる。**
@@ -986,41 +1022,52 @@ private const val TICK_CHAR_DP = 6.6f
  *
  * - **左に値軸を置き、薄い目盛り線を横へ引く。** 目盛りの無い棒は長さの意味が読めない。
  * - **軸は L 字**（左と下）。下だけの罫では、縦の値がどこから測られているか分からない。
- * - 刻みは 1・2・2.5・5・10 の倍数だけ。半端な刻みは読み取れない。
  *
+ * ## ⚠️ 軸は固定する（2026/9/25）
+ *
+ * 以前は棒を最大値に、線を最小〜最大に合わせて伸縮させていた。
+ * **図の形がいつも同じになり、値の大小が形から読めない**——30% の雨も 90% の雨も
+ * 天井まで届き、2℃ しか動かない日も 10℃ 動く日も同じ振れ幅に見えた。
+ * 軸を固定すれば、形そのものが量を語る。
+ *
+ * 棒と線の軸は刻みの数を揃え（[FixedAxis] の注記）、目盛り線を一組にする。
  * この体系に合わせて変えたのは色だけである。棒は塗らず細い罫にし、
  * 燠火は**今の一点**にだけ使う。
  *
- * @param bars 左の軸で読む値（降水確率など）。0 を底とする。
- * @param line 右肩の別系列（気温など）。棒とは別の幅で伸縮させる。
+ * @param bars 左の軸で読む値（降水確率など）。
+ * @param line 右の軸で読む別の系列（気温など）。
  */
 @Composable
 fun SeriesFigure(
     labels: List<String>,
     bars: List<Float>,
     barUnit: String,
+    barAxis: FixedAxis,
     modifier: Modifier = Modifier,
     line: List<Float> = emptyList(),
     lineUnit: String = "",
-    height: androidx.compose.ui.unit.Dp = 96.dp,
+    lineAxis: FixedAxis? = null,
+    height: Dp = 112.dp,
 ) {
     if (labels.size < 2 || bars.size != labels.size) return
-    val barTop = niceTicks(0f, (bars.max()).coerceAtLeast(1f), 3)
-    val ceiling = barTop.last().coerceAtLeast(bars.max())
-    val lineLow = if (line.isEmpty()) 0f else line.min()
-    val lineHigh = if (line.isEmpty()) 1f else line.max()
-    val lineSpan = (lineHigh - lineLow).takeIf { it > 0f } ?: 1f
+    val hasLine = lineAxis != null && line.size == bars.size
 
     val axis = ObservatoryColors.LineStrong
-    val grid = ObservatoryColors.Faint
+    val grid = ObservatoryColors.Grid
     val barInk = ObservatoryColors.Muted
     val lineInk = ObservatoryColors.EmberText
 
+    val barTexts = barAxis.ticks.map { formatTick(it) }
+    val lineTexts = lineAxis?.ticks?.map { formatTick(it) }.orEmpty()
+    val barAxisWidth = valueAxisWidth(barTexts)
+    val reveal = rememberReveal()
+    val lineAxisWidth = if (hasLine) valueAxisWidth(lineTexts) else 0.dp
+
     Column(modifier = modifier.fillMaxWidth()) {
         // 何の図かを名乗る。単位を書かない図は、読む側に前提を要求する。
-        Row(modifier = Modifier.fillMaxWidth().padding(bottom = 3.dp)) {
+        Row(modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp)) {
             ObservatoryText(text = barUnit, color = ObservatoryColors.Faint, size = ObservatoryType.Label, mono = true)
-            if (line.isNotEmpty()) {
+            if (hasLine) {
                 Spacer(modifier = Modifier.weight(1f))
                 ObservatoryText(
                     text = lineUnit,
@@ -1031,26 +1078,11 @@ fun SeriesFigure(
             }
         }
         Row(modifier = Modifier.fillMaxWidth()) {
-            // 左の値軸。
-            //
-            // ⚠️ **数字は等間隔に置いてはならない。** 目盛り線は値で決まる位置に引かれ、
-            // 天井は刻みの最大とデータの最大の大きい方になるので、
-            // 等間隔に並べると数字と線が食い違う。実機で 0 と 50 がそれぞれ
-            // 自分の線より上に出た（2026/9/1）。**線と同じ式で置く。**
-            val barDecimals = tickDecimals(barTop)
-            Box(modifier = Modifier.width(tickWidth(barTop, barDecimals)).height(height)) {
-                barTop.forEach { v ->
-                    ObservatoryText(
-                        text = formatTick(v, barDecimals),
-                        color = ObservatoryColors.Faint,
-                        size = ObservatoryType.Label,
-                        mono = true,
-                        modifier = Modifier
-                            .align(Alignment.TopEnd)
-                            .offset(y = height * (1f - v / ceiling) - 6.dp),
-                    )
-                }
-            }
+            // 左の値軸。**線と同じ式で置く**（等間隔に並べると線とずれる）。
+            ValueAxis(
+                ticks = barAxis.ticks.mapIndexed { i, v -> (1f - barAxis.fraction(v)) to barTexts[i] },
+                height = height,
+            )
             Spacer(modifier = Modifier.width(4.dp))
             Box(
                 modifier = Modifier
@@ -1059,9 +1091,9 @@ fun SeriesFigure(
                     .drawBehind {
                         val hair = 1.dp.toPx()
                         // 目盛り線。**薄く、しかし必ず引く。**
-                        barTop.forEach { v ->
-                            val y = size.height * (1f - v / ceiling)
-                            drawRect(grid, Offset(0f, y), Size(size.width, hair))
+                        barAxis.ticks.forEach { v ->
+                            val y = size.height * (1f - barAxis.fraction(v))
+                            drawRect(grid, Offset(0f, y.coerceAtMost(size.height - hair)), Size(size.width, hair))
                         }
                         // L 字の軸。
                         drawRect(axis, Offset(0f, 0f), Size(hair, size.height))
@@ -1071,7 +1103,7 @@ fun SeriesFigure(
                         val slot = size.width / bars.size
                         val w = (slot * 0.34f).coerceAtMost(5.dp.toPx())
                         bars.forEachIndexed { i, v ->
-                            val h = size.height * (v / ceiling)
+                            val h = size.height * barAxis.fraction(v) * reveal.value
                             if (h > 0f) {
                                 drawRect(
                                     barInk,
@@ -1080,21 +1112,25 @@ fun SeriesFigure(
                                 )
                             }
                         }
-                        // 線。別の幅で伸縮させ、上下に少し余白を残す。
-                        if (line.size == bars.size) {
-                            fun y(v: Float) =
-                                size.height * 0.88f * (1f - (v - lineLow) / lineSpan) +
-                                    size.height * 0.06f
+                        // 線。右の軸で読む。**軸の外の値は端に留める**（[FixedAxis.fraction]）。
+                        if (hasLine) {
+                            fun y(v: Float) = size.height * (1f - lineAxis.fraction(v))
+                            // 線は左から引かれる。引き終わっていない区間は、途中まで描く。
+                            val drawn = (line.size - 1) * reveal.value
                             for (i in 0 until line.size - 1) {
+                                val part = (drawn - i).coerceIn(0f, 1f)
+                                if (part <= 0f) break
+                                val a = Offset(slot * (i + 0.5f), y(line[i]))
+                                val b = Offset(slot * (i + 1.5f), y(line[i + 1]))
                                 drawLine(
                                     color = lineInk,
-                                    start = Offset(slot * (i + 0.5f), y(line[i])),
-                                    end = Offset(slot * (i + 1.5f), y(line[i + 1])),
-                                    strokeWidth = hair,
+                                    start = a,
+                                    end = a + (b - a) * part,
+                                    strokeWidth = 1.5.dp.toPx(),
                                 )
                             }
                             // **今の一点だけ燠火の格点。** ほかは線のまま。
-                            val s = 3.5.dp.toPx()
+                            val s = 4.dp.toPx()
                             drawRect(
                                 ObservatoryColors.Ember,
                                 Offset(slot * 0.5f - s / 2, y(line.first()) - s / 2),
@@ -1109,41 +1145,33 @@ fun SeriesFigure(
             // 「気温が上がっている」までは分かるが、何度から何度へ上がったのかが
             // 分からない（本人の指摘・2026/9/1）。左の軸は棒のものなので、
             // 線には**右に別の軸**を立てる。
-            if (line.size == bars.size) {
+            if (hasLine) {
                 Spacer(modifier = Modifier.width(4.dp))
-                val lineTicks = listOf(lineHigh, (lineHigh + lineLow) / 2f, lineLow)
-                val lineDecimals = tickDecimals(lineTicks)
-                Box(
-                    modifier = Modifier
-                        .width(tickWidth(lineTicks, lineDecimals, min = 30.dp))
-                        .height(height),
-                ) {
-                    lineTicks.forEach { v ->
-                        ObservatoryText(
-                            text = formatTick(v, lineDecimals),
-                            color = ObservatoryColors.EmberText,
-                            size = ObservatoryType.Label,
-                            mono = true,
-                            modifier = Modifier
-                                .align(Alignment.TopStart)
-                                .offset(
-                                    y = height * 0.88f * (1f - (v - lineLow) / lineSpan) +
-                                        height * 0.06f - 6.dp,
-                                ),
-                        )
-                    }
-                }
+                ValueAxis(
+                    ticks = lineAxis.ticks.mapIndexed { i, v ->
+                        (1f - lineAxis.fraction(v)) to lineTexts[i]
+                    },
+                    height = height,
+                    color = ObservatoryColors.EmberText,
+                    end = false,
+                )
             }
         }
         // 下の見出し。全部書くと潰れるので、三つおきに置く。
+        //
+        // ⚠️ 左右の余白は**軸の実際の幅**から取る。決め打ち（左 30dp・右 34dp）で寄せていたので、
+        // 軸の字の幅が変わると見出しが棒とずれた（2026/9/25 の点検）。
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(start = 30.dp, end = if (line.size == bars.size) 34.dp else 0.dp)
-                .padding(top = 2.dp),
+                .padding(
+                    start = barAxisWidth + 4.dp,
+                    end = if (hasLine) lineAxisWidth + 4.dp else 0.dp,
+                )
+                .padding(top = 4.dp),
         ) {
             labels.forEachIndexed { i, text ->
-                Box(modifier = Modifier.weight(1f)) {
+                Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
                     if (i % 3 == 0) {
                         ObservatoryText(
                             text = text,
@@ -1154,6 +1182,104 @@ fun SeriesFigure(
                     }
                 }
             }
+        }
+    }
+}
+
+// ---- 目盛りの字の置き方（2026/9/25） -----------------------------------------
+//
+// ⚠️ **字の寸法を見積りで決め打ちにしない。**
+// 軸の幅は「10sp の一字＝6.6dp」、字の中心は「左へ 8dp」「上へ 6dp」と、
+// 図ごとに別々の見積りで置いていた。漢字の混じる目盛り（「1500分」）は幅が足りずに
+// 切れ、字を大きくすると全部の位置がずれる。**描く字と同じ様式で測れば、外れようがない。**
+
+/** 測った字の寸法。 */
+internal class Measured(val widths: List<Dp>, val height: Dp) {
+    val widest: Dp get() = widths.maxOrNull() ?: 0.dp
+    val half: Dp get() = height / 2
+}
+
+/** 字を測る。[observatoryStyle] と同じ様式で測るので、描いた字と寸法が一致する。 */
+@Composable
+internal fun measureLabels(
+    texts: List<String>,
+    size: TextUnit = ObservatoryType.Label,
+    mono: Boolean = true,
+): Measured {
+    val measurer = rememberTextMeasurer()
+    val density = LocalDensity.current
+    return remember(texts, size, mono, density.density, density.fontScale) {
+        val style = observatoryStyle(size, mono)
+        val sizes = texts.ifEmpty { listOf("0") }.map {
+            measurer.measure(it, style, maxLines = 1, softWrap = false).size
+        }
+        with(density) {
+            Measured(
+                widths = sizes.map { it.width.toDp() },
+                height = sizes.maxOf { it.height }.toDp(),
+            )
+        }
+    }
+}
+
+/**
+ * 縦の値軸。目盛りの字を**線と同じ高さの中心**へ置く。
+ *
+ * @param ticks 上端からの割合（0 が上・1 が下）と字の組。
+ * @param end 右寄せにするか（図の左に立てる軸）。左寄せは図の右に立てる軸。
+ */
+@Composable
+internal fun ValueAxis(
+    ticks: List<Pair<Float, String>>,
+    height: Dp,
+    color: Color = ObservatoryColors.Faint,
+    end: Boolean = true,
+) {
+    val measured = measureLabels(ticks.map { it.second })
+    Box(modifier = Modifier.width(measured.widest + 1.dp).height(height)) {
+        ticks.forEach { (fromTop, text) ->
+            ObservatoryText(
+                text = text,
+                color = color,
+                size = ObservatoryType.Label,
+                mono = true,
+                modifier = Modifier
+                    .align(if (end) Alignment.TopEnd else Alignment.TopStart)
+                    .offset(y = height * fromTop - measured.half),
+            )
+        }
+    }
+}
+
+/** 縦の値軸が取る幅。下の見出しを軸の分だけ右へ寄せるときに使う。 */
+@Composable
+internal fun valueAxisWidth(texts: List<String>): Dp = measureLabels(texts).widest + 1.dp
+
+/**
+ * 横の軸の見出し。字の**中心**を位置に合わせ、両端では図の外へ出ないよう内へ寄せる。
+ *
+ * @param marks 左端からの割合（0〜1）と字の組。
+ */
+@Composable
+internal fun AxisLabels(
+    marks: List<Pair<Float, String>>,
+    modifier: Modifier = Modifier,
+    color: Color = ObservatoryColors.Faint,
+    size: TextUnit = ObservatoryType.Label,
+) {
+    val measured = measureLabels(marks.map { it.second }, size)
+    BoxWithConstraints(modifier = modifier.fillMaxWidth().height(measured.height)) {
+        val span = maxWidth
+        marks.forEachIndexed { i, (at, text) ->
+            val w = measured.widths[i]
+            val x = (span * at - w / 2).coerceIn(0.dp, (span - w).coerceAtLeast(0.dp))
+            ObservatoryText(
+                text = text,
+                color = color,
+                size = size,
+                mono = true,
+                modifier = Modifier.offset(x = x),
+            )
         }
     }
 }

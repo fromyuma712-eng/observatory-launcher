@@ -1,7 +1,18 @@
 package com.yuma.observatorylauncher.ui
 
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.ui.input.pointer.pointerInput
 import android.content.Context
 import androidx.activity.compose.BackHandler
+import kotlinx.coroutines.CancellationException
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.Spring
+import androidx.activity.compose.PredictiveBackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -66,6 +77,7 @@ import com.yuma.observatorylauncher.ui.theme.ObservatoryDimens
 import com.yuma.observatorylauncher.ui.theme.ObservatoryDotGrid
 import com.yuma.observatorylauncher.ui.theme.ObservatoryMotion
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.animation.core.animateFloatAsState
@@ -80,6 +92,8 @@ import androidx.compose.animation.core.animateFloatAsState
 @Composable
 fun CommandLine(
     visible: Boolean,
+    /** 開いたらすぐ打てるようにするか（検索行を押して開いたとき）。 */
+    typeOnOpen: Boolean = false,
     apps: List<AppEntry>,
     config: LayoutConfig,
     generations: Int,
@@ -92,6 +106,7 @@ fun CommandLine(
     val context = LocalContext.current
     val haptics = LocalHapticFeedback.current
     val density = LocalDensity.current
+    val badges by rememberBadged()
     var query by remember { mutableStateOf(TextFieldValue("")) }
     var expanded by remember { mutableStateOf<String?>(null) }
     var groupMenu by remember { mutableStateOf<String?>(null) }
@@ -102,6 +117,14 @@ fun CommandLine(
     // 一件ごとに長押しし直すのは現実的でない。押しただけで操作が開くようにする。
     var editorMode by remember { mutableStateOf(false) }
     val focus = remember { FocusRequester() }
+    // 検索行を押して開いたときだけ、鍵盤を出す（下の「開いた直後に鍵盤を出さない」の例外）。
+    // 掃き上げで開いたときは眺めるためなので、従来どおり出さない。
+    LaunchedEffect(visible, typeOnOpen) {
+        if (visible && typeOnOpen) {
+            delay(120)
+            runCatching { focus.requestFocus() }
+        }
+    }
 
     val clearEditing = {
         expanded = null
@@ -146,19 +169,31 @@ fun CommandLine(
 
     // 面を開いたら、出る予定のアイコンを背景で先に作る(走査中の復号を無くす)。
     LaunchedEffect(visible, iconPx, visibleApps) {
-        if (visible) AppRepository.warmIcons(context, visibleApps, iconPx)
+        if (visible) AppRepository.warmIcons(context, visibleApps, iconPx, IconTone.mono)
     }
 
     // 普段使いの重みも先に温める。読み出しは端末への問い合わせなので、
     // 一文字目を打った拍子に取りにいくと、その一打だけが目に見えて遅れる。
+    var weights by remember { mutableStateOf<Map<String, Double>>(emptyMap()) }
     LaunchedEffect(visible) {
         if (visible) {
-            withContext(Dispatchers.IO) { runCatching { Usage.frecency(context) } }
+            weights = withContext(Dispatchers.IO) { runCatching { Usage.frecency(context) }.getOrDefault(emptyMap()) }
         }
+    }
+    // よく使うのに、ホームに置いていないもの（2026-09-25）。一覧を開く理由の多くは
+    // 「ホームに無いアプリを探す」ことなので、その答えを指の届く一番下に先回りして置く。
+    val onHome = remember(config.sections) { config.sections.flatMap { it.items }.toSet() }
+    val frequent = remember(weights, ordinary, onHome) {
+        ordinary.filter { it.id !in onHome && (weights[it.packageName] ?: 0.0) > 0.0 }
+            .sortedByDescending { weights[it.packageName] ?: 0.0 }
+            .distinctBy { it.packageName }
+            .take(FREQUENT_COUNT)
     }
 
     val launch: (AppEntry) -> Unit = { entry ->
-        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+        // 開くのは軽い手応えで。強い振動（LongPress）は長押しのために取っておく
+        // ——同じ強さで返すと、押したのか長押ししたのかが指で分からない。
+        haptics.performHapticFeedback(HapticFeedbackType.VirtualKey)
         AppRepository.launch(context, entry)
         onDismiss()
     }
@@ -169,23 +204,50 @@ fun CommandLine(
     // 面の中身が数十行あると、たった 4dp の動きのために毎フレーム全体を測り直すことになり、
     // 開く瞬間に一枚 100ms を超える回が出ていた（実測）。
     // 同じ 4dp の立ち上がりでも、描画層をずらすだけなら測り直しは起きない。
+    //
+    // ## せり上がって開く（2026-09-25）
+    //
+    // 開く身振りは「下から上へ掃く」なので、面も**下からせり上がり、バネで収まる**。
+    // 以前の 4dp の浮き上がりは、動きの語彙を二つに絞っていた頃の最小限だった。
+    val riseFrom = with(density) { 56.dp.toPx() }
     val rise by animateFloatAsState(
-        targetValue = if (visible) 0f else with(density) { ObservatoryMotion.RiseOffset.toPx() },
-        animationSpec = tween(ObservatoryMotion.RiseDurationMs),
+        targetValue = if (visible) 0f else riseFrom,
+        animationSpec = if (visible) {
+            spring(dampingRatio = 0.86f, stiffness = Spring.StiffnessMediumLow)
+        } else {
+            tween(160)
+        },
         label = "rise",
     )
+    // 戻る身振りの進み（0〜1）。**予測型の戻る**——指を引く間、面が縮みながら下がり、
+    // 途中でやめれば元へ戻る。閉じるかどうかを、閉じる前に目で確かめられる。
+    var backProgress by remember { mutableFloatStateOf(0f) }
+    LaunchedEffect(visible) { if (!visible) backProgress = 0f }
+    val backTravel = with(density) { 72.dp.toPx() }
     AnimatedVisibility(
         visible = visible,
-        enter = fadeIn(tween(ObservatoryMotion.RiseDurationMs)),
-        exit = fadeOut(tween(ObservatoryMotion.RiseDurationMs)),
-        modifier = Modifier.graphicsLayer { translationY = rise },
+        enter = fadeIn(tween(180)),
+        exit = fadeOut(tween(160)),
+        modifier = Modifier.graphicsLayer {
+            translationY = rise + backProgress * backTravel
+            val shrink = 1f - 0.08f * backProgress
+            scaleX = shrink
+            scaleY = shrink
+            alpha = 1f - 0.10f * backProgress
+        },
     ) {
         // 編集中の戻るは、まず編集を畳む。面ごと閉じるのはその次。
-        BackHandler(enabled = true) {
-            when {
-                expanded != null || groupMenu != null -> clearEditing()
-                editorMode -> editorMode = false
-                else -> onDismiss()
+        val editingOpen = expanded != null || groupMenu != null || editorMode
+        BackHandler(enabled = editingOpen) {
+            if (expanded != null || groupMenu != null) clearEditing() else editorMode = false
+        }
+        PredictiveBackHandler(enabled = !editingOpen) { events ->
+            try {
+                events.collect { event -> backProgress = event.progress }
+                onDismiss()
+            } catch (cancelled: CancellationException) {
+                backProgress = 0f
+                throw cancelled
             }
         }
 
@@ -251,10 +313,33 @@ fun CommandLine(
                     .fillMaxSize()
                     .windowInsetsPadding(WindowInsets.safeDrawing)
             ) {
+                // 群の見出しが一覧の何番目にあるか（右端の索引から飛ぶため）。
+                // **下の LazyColumn に並べる順と同じ数え方**をここに書く。並べ方を変えたら、ここも直す。
+                val jumpTargets = remember(groups, config.groups, expanded, frequent, privateSpace, privateResults.size) {
+                    var at = 0
+                    val out = ArrayList<Pair<String, Int>>()
+                    if (frequent.isNotEmpty()) at += 2
+                    groups.forEach { (title, entries) ->
+                        val isRow = config.groups.firstOrNull { it.title == title }?.row == true
+                        at += if (isRow) {
+                            (if (entries.any { it.id == expanded }) 1 else 0) + 1
+                        } else {
+                            entries.size
+                        }
+                        out += title to at
+                        at += 1
+                    }
+                    if (!privateSpace.locked && privateResults.isNotEmpty()) at += 1
+                    if (privateSpace.exists && !privateSpace.locked) out += "私" to at
+                    out.asReversed() // 見た目の上から下の順へ
+                }
+                val listState = rememberLazyListState()
+                val scope = rememberCoroutineScope()
+                Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
                 LazyColumn(
+                    state = listState,
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f)
+                        .fillMaxSize()
                         .nestedScroll(pullToClose),
                     reverseLayout = true,
                 ) {
@@ -276,6 +361,7 @@ fun CommandLine(
                             AppRow(
                                 label = e.label,
                                 icon = rememberAppIcon(e, iconPx).value,
+                                badged = e.packageName in badges,
                                 display = listDisplay,
                                 highlighted = expanded == e.id,
                                 expanded = expanded == e.id,
@@ -315,6 +401,44 @@ fun CommandLine(
                         }
                     } else {
                         // 眺める面。群ごとにまとめ、宣言の先頭が最下段＝指に最も近い。
+                        // よく使う（ホーム以外）。**一番下＝検索行のすぐ上**に置く。
+                        if (frequent.isNotEmpty()) {
+                            item(key = "frequent") {
+                                IconCluster(
+                                    entries = frequent.map { e ->
+                                        ClusterItem(
+                                            key = "f:" + e.id,
+                                            label = e.label,
+                                            icon = rememberAppIcon(e, iconPx).value,
+                                            badged = e.packageName in badges,
+                                            onClick = { launch(e) },
+                                            onLongClick = {
+                                                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                AppRepository.openAppInfo(context, e)
+                                            },
+                                        )
+                                    },
+                                    display = listDisplay,
+                                )
+                            }
+                            item(key = "frequent-head") {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = ObservatoryDimens.Gutter)
+                                        .padding(top = 14.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    ObservatoryTag(text = Lexicon.FREQUENT, color = ObservatoryColors.EmberText)
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    ObservatoryText(
+                                        text = "ホーム以外でよく使う",
+                                        color = ObservatoryColors.Faint,
+                                        size = ObservatoryType.Note,
+                                    )
+                                }
+                            }
+                        }
                         groups.forEach { (title, entries) ->
                             val isRow = config.groups.firstOrNull { it.title == title }?.row == true
                             if (isRow) {
@@ -345,6 +469,7 @@ fun CommandLine(
                                                 key = e.id,
                                                 label = e.label,
                                                 icon = rememberAppIcon(e, iconPx).value,
+                                                badged = e.packageName in badges,
                                                 onClick = { launch(e) },
                                                 onLongClick = {
                                                     haptics.performHapticFeedback(
@@ -368,6 +493,7 @@ fun CommandLine(
                                     AppRow(
                                         label = e.label,
                                         icon = rememberAppIcon(e, iconPx).value,
+                                        badged = e.packageName in badges,
                                         display = listDisplay,
                                         highlighted = expanded == e.id,
                                         expanded = expanded == e.id,
@@ -474,6 +600,7 @@ fun CommandLine(
                                         key = e.id,
                                         label = e.label,
                                         icon = rememberAppIcon(e, iconPx).value,
+                                        badged = e.packageName in badges,
                                         onClick = { launch(e) },
                                         onLongClick = {
                                             // 施錠の意味が壊れるので台帳へは固定させない。
@@ -507,6 +634,21 @@ fun CommandLine(
                             )
                         }
                     }
+                }
+                if (!searching && !editorMode && jumpTargets.size > 1) {
+                    GroupIndex(
+                        targets = jumpTargets,
+                        onJump = { index ->
+                            scope.launch {
+                                // 逆向きの一覧では「先頭」は下端。見出しを上端へ置くため、
+                                // 画面の高さぶん手前（負の位置）を指定する。
+                                val viewport = listState.layoutInfo.viewportSize.height
+                                listState.scrollToItem(index, -(viewport - with(density) { 48.dp.roundToPx() }))
+                            }
+                        },
+                        modifier = Modifier.align(Alignment.CenterEnd),
+                    )
+                }
                 }
 
                 if (editorMode) {
@@ -545,7 +687,7 @@ fun CommandLine(
                         .height(ObservatoryDimens.Row + 8.dp)
                         .clickable(
                             interactionSource = remember { MutableInteractionSource() },
-                            indication = null,
+                            indication = PressIndication.Row,
                         ) { focus.requestFocus() }
                         .padding(horizontal = ObservatoryDimens.Gutter),
                     verticalAlignment = Alignment.CenterVertically,
@@ -576,7 +718,7 @@ fun CommandLine(
                             textStyle = TextStyle(
                                 color = ObservatoryColors.Paper,
                                 fontSize = 17.sp,
-                                fontFamily = FontFamily.SansSerif,
+                                fontFamily = ObservatoryFonts.Sans,
                                 letterSpacing = 0.34.sp,
                             ),
                             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
@@ -659,10 +801,9 @@ private fun PrivateSpaceRow(
             .fillMaxWidth()
             .heightIn(min = ObservatoryDimens.Row)
             .riseIn()
-            .pressFade(interaction)
             .combinedClickable(
                 interactionSource = interaction,
-                indication = null,
+                indication = PressIndication.Row,
                 onClick = onToggle,
                 onLongClick = onSettings,
             )
@@ -794,10 +935,9 @@ private fun EditToggle(editing: Boolean, onToggle: () -> Unit) {
     Box(
         modifier = Modifier
             .heightIn(min = ObservatoryDimens.Row)
-            .pressFade(interaction)
             .combinedClickable(
                 interactionSource = interaction,
-                indication = null,
+                indication = PressIndication.Row,
                 onClick = onToggle,
             )
             .padding(start = 12.dp),
@@ -809,5 +949,61 @@ private fun EditToggle(editing: Boolean, onToggle: () -> Unit) {
             size = ObservatoryType.Body,
             tracking = 0.1f,
         )
+    }
+}
+
+private const val FREQUENT_COUNT = 5
+
+/**
+ * 右端の索引。**群の頭文字を縦に並べ、触れた群へ飛ぶ。** なぞれば群をまたぐたびに軽く震える。
+ *
+ * 群が十五を超え、端から端まで掃いて探すのが遠かった（2026-09-25）。
+ * 余白（24dp）の中に収まる大きさにして、像の押し所を塞がない。
+ */
+@Composable
+private fun GroupIndex(targets: List<Pair<String, Int>>, onJump: (Int) -> Unit, modifier: Modifier = Modifier) {
+    val haptics = LocalHapticFeedback.current
+    var current by remember { mutableStateOf<Int?>(null) }
+    val rowHeight = 22.dp
+    val density = LocalDensity.current
+    fun pick(y: Float) {
+        val i = (y / with(density) { rowHeight.toPx() }).toInt().coerceIn(0, targets.lastIndex)
+        if (i != current) {
+            current = i
+            haptics.performHapticFeedback(HapticFeedbackType.SegmentTick)
+            onJump(targets[i].second)
+        }
+    }
+    Column(
+        modifier = modifier
+            .width(ObservatoryDimens.Gutter)
+            .pointerInput(targets) {
+                detectTapGestures(onPress = { p ->
+                    pick(p.y)
+                    tryAwaitRelease()
+                    current = null
+                })
+            }
+            .pointerInput(targets) {
+                detectVerticalDragGestures(
+                    onDragStart = { p -> pick(p.y) },
+                    onDragEnd = { current = null },
+                    onDragCancel = { current = null },
+                ) { change, _ ->
+                    change.consume()
+                    pick(change.position.y)
+                }
+            },
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        targets.forEachIndexed { i, (title, _) ->
+            Box(modifier = Modifier.height(rowHeight), contentAlignment = Alignment.Center) {
+                ObservatoryText(
+                    text = title.take(1),
+                    color = if (current == i) ObservatoryColors.EmberText else ObservatoryColors.Faint,
+                    size = ObservatoryType.Label,
+                )
+            }
+        }
     }
 }

@@ -227,7 +227,7 @@ fun InfoTilePicker(
                     .heightIn(min = ObservatoryDimens.Row)
                     .combinedClickable(
                         interactionSource = closeInteraction,
-                        indication = null,
+                        indication = PressIndication.Row,
                         onClick = onClose,
                     )
                     .padding(start = 12.dp),
@@ -250,7 +250,7 @@ fun InfoTilePicker(
                             .heightIn(min = 54.dp)
                             .combinedClickable(
                                 interactionSource = interaction,
-                                indication = null,
+                                indication = PressIndication.Row,
                                 onClick = { onSelect(entry) },
                             ),
                         verticalAlignment = Alignment.CenterVertically,
@@ -263,7 +263,7 @@ fun InfoTilePicker(
                         Spacer(modifier = Modifier.width(10.dp))
                         Column {
                             ObservatoryText(entry.label, ObservatoryColors.Paper, 14.sp)
-                            ObservatoryText(entry.detail, ObservatoryColors.Muted, 12.sp)
+                            ObservatoryText(entry.detail, ObservatoryColors.Muted, ObservatoryType.Note)
                         }
                     }
                 }
@@ -331,7 +331,7 @@ fun InfoTileEditor(
             ObservatoryText(
                 it,
                 ObservatoryColors.EmberText,
-                11.sp,
+                ObservatoryType.Note,
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
             )
         }
@@ -374,15 +374,15 @@ private fun InfoField(
     onValueChange: (TextFieldValue) -> Unit,
 ) {
     Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp)) {
-        ObservatoryText(label, ObservatoryColors.Muted, 12.sp)
+        ObservatoryText(label, ObservatoryColors.Muted, ObservatoryType.Note)
         BasicTextField(
             value = value,
             onValueChange = onValueChange,
             cursorBrush = SolidColor(ObservatoryColors.Ember),
             textStyle = TextStyle(
                 color = ObservatoryColors.Paper,
-                fontSize = 13.sp,
-                fontFamily = FontFamily.SansSerif,
+                fontSize = ObservatoryType.Body,
+                fontFamily = ObservatoryFonts.Sans,
             ),
             modifier = Modifier
                 .fillMaxWidth()
@@ -474,7 +474,7 @@ private fun InfoTileCell(
             .fillMaxWidth()
             .combinedClickable(
                 interactionSource = interaction,
-                indication = null,
+                indication = PressIndication.Row,
                 onClick = {
                     when {
                         // 許可が要るなら、まずそれを求める。
@@ -556,7 +556,7 @@ private fun InfoTileCell(
             content.access == InfoAccess.NONE &&
             tile.span >= 3
         val asLedger = !asAgenda && content.lines.size == 1 && tile.span >= 3
-        val headSize = if (tile.span <= 1) 12.sp else 14.sp
+        val headSize = if (tile.span <= 1) ObservatoryType.Label else ObservatoryType.Note
         val headTop = if (editing || needsAccess) 5.dp else 0.dp
         if (asAgenda) {
             Row(
@@ -878,10 +878,14 @@ private const val APPROXIMATE_NOTE = "位置は概略（大阪）"
  * 取れていなければ既定の点で引いた旨を書く。
  * どちらも書けないときは何も足さない——**空欄を作り話で埋めない。**
  */
-private fun weatherOrigin(weather: com.yuma.observatorylauncher.data.Weather): String? = when {
-    weather.approximate -> APPROXIMATE_NOTE
-    weather.place.isNotBlank() -> weather.place + "の空"
-    else -> null
+private fun weatherOrigin(weather: com.yuma.observatorylauncher.data.Weather): String? {
+    val where = when {
+        weather.approximate -> APPROXIMATE_NOTE
+        weather.place.isNotBlank() -> weather.place + "の空"
+        else -> null
+    }
+    // 値の出所も添える（2026-09-25・気象庁の値を重ねるようになったため）。
+    return listOfNotNull(where, weather.source.takeIf { it.isNotBlank() }).joinToString("  ∧  ").ifBlank { null }
 }
 
 

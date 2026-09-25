@@ -5,6 +5,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -86,6 +89,7 @@ internal fun MusicBoardPage(
     // **生きた値も絵柄も、この面で一度だけ作る。**
     // 下の板が別々に取りに行くと、同じものを二度読み、片方だけが古くなる。
     val live = rememberNowPlaying(refreshKey)
+    val veil = rememberVeil()
     val loaded by produceState<Artwork.Loaded?>(null, refreshKey, live.revision) {
         value = withContext(Dispatchers.IO) { Artwork.load(context) }
     }
@@ -100,11 +104,13 @@ internal fun MusicBoardPage(
             .padding(horizontal = ObservatoryDimens.Gutter),
     ) {
         // 出口は一行だけ、面の頭に置く。**どこから鳴るかは、押す前に知りたい。**
-        if (route.isNotBlank()) {
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
+        // 出力先の行。右端にジャケットを伏せる切り替えを置く（[VeilToggle]）。
+        // 出力先が取れないときも行は残す——切り替えの置き場が消えると、伏せを解けなくなる。
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (route.isNotBlank()) {
                 Box(
                     modifier = Modifier
                         .size(ObservatoryDimens.Anchor)
@@ -116,8 +122,12 @@ internal fun MusicBoardPage(
                     color = ObservatoryColors.Muted,
                     size = ObservatoryType.Note,
                     mono = true,
+                    modifier = Modifier.weight(1f),
                 )
+            } else {
+                Spacer(modifier = Modifier.weight(1f))
             }
+            if (live.current != null) VeilToggle(veil)
         }
 
         if (live.current != null) {
@@ -125,13 +135,14 @@ internal fun MusicBoardPage(
                 live = live,
                 loaded = loaded,
                 refreshKey = refreshKey,
-                modifier = Modifier.weight(1f).padding(top = 12.dp),
+                veil = veil,
+                modifier = Modifier.weight(1f).padding(top = 4.dp),
             )
         } else {
             SilentBoard(
                 display = display,
                 refreshKey = refreshKey,
-                modifier = Modifier.weight(1f).padding(top = 12.dp),
+                modifier = Modifier.weight(1f).padding(top = 4.dp),
             )
         }
     }
@@ -224,6 +235,7 @@ private fun SilentBoard(
     // 音の面は**本人の面**なので、私的な記録は落とす（[Hidden.DROP]）。
     // 数だけを残す匿名化は計器盤の役で、ここは絵柄も題も大きく出す面である。
     val log by rememberPlays(refreshKey, Hidden.DROP)
+    val badges by rememberBadged()
     val candidates = remember(refreshKey) {
         AppRepository.cached()
             .filter { it.category == ApplicationInfo.CATEGORY_AUDIO }
@@ -244,21 +256,19 @@ private fun SilentBoard(
     val today = remember(log) { Listening.today(log, now) }
     val summary = remember(today) { Listening.summarize(today, now) }
     val days = remember(log) { Listening.byDay(log, DAYS_SHOWN, now) }
-    val hours = remember(log) { Listening.byHour(log, now) }
+    // ⚠️ 時刻別の分布も**七日**で数える。記録の全期間（ひと月）で数えていたので、
+    // 隣の「七日の時系列」「演者別の合計」と期間が食い違い、06時台だけで
+    // 七日の合計を超える値が出ていた（2026/9/25 の点検）。
+    val hours = remember(log) { Listening.byHour(Listening.within(log, DAYS_SHOWN, now), now) }
     // 七日の推移と同じ期間で数える。**隣り合う図が別の期間を指さない。**
     val artists = remember(log) { Listening.byArtist(Listening.within(log, DAYS_SHOWN, now), now) }
 
-    Column(modifier = modifier.fillMaxSize()) {
+    val todayBlock: @Composable () -> Unit = {
         // 今日の聴取だけは数字で置く。**札に一つだけ**という約束はここでも守る
         // ——図が三つ並ぶ面で、どこから読むかを決める一点が要る。
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom) {
             Column {
-                ObservatoryText(
-                    text = "今日",
-                    color = ObservatoryColors.Faint,
-                    size = ObservatoryType.Label,
-                    mono = true,
-                )
+                ObservatoryTag(text = Lexicon.TODAY)
                 ObservatoryText(
                     text = readableMinutes(summary.listenedMs),
                     color = ObservatoryColors.Paper,
@@ -276,7 +286,8 @@ private fun SilentBoard(
                 )
             }
         }
-
+    }
+    val weekBlock: @Composable () -> Unit = {
         if (days.any { it.listenedMs > 0 }) {
             BoardRule(modifier = Modifier.padding(top = 14.dp))
             FigureCaption("七日の時系列")
@@ -288,7 +299,8 @@ private fun SilentBoard(
                 modifier = Modifier.padding(top = 6.dp),
             )
         }
-
+    }
+    val hourBlock: @Composable () -> Unit = {
         if (hours.any { it > 0 }) {
             BoardRule(modifier = Modifier.padding(top = 14.dp))
             FigureCaption("時刻別の分布")
@@ -306,7 +318,8 @@ private fun SilentBoard(
                 modifier = Modifier.padding(top = 6.dp),
             )
         }
-
+    }
+    val artistBlock: @Composable () -> Unit = {
         if (artists.isNotEmpty()) {
             BoardRule(modifier = Modifier.padding(top = 14.dp))
             FigureCaption("演者別の合計")
@@ -317,12 +330,12 @@ private fun SilentBoard(
                 format = { readableMinutes(it) },
                 axis = true,
                 axisLabel = { "${(it / 60_000).toInt()}分" },
+                tickUnit = TICK_MINUTE,
                 modifier = Modifier.padding(top = 6.dp),
             )
         }
-
-        Spacer(modifier = Modifier.weight(1f))
-
+    }
+    val appsBlock: @Composable () -> Unit = {
         // アプリは面の足元へ。指の届く位置に置く。
         if (apps.isNotEmpty()) {
             BoardRule()
@@ -333,6 +346,7 @@ private fun SilentBoard(
                         key = entry.packageName,
                         label = entry.label,
                         icon = rememberAppIcon(entry, iconPx).value,
+                        badged = entry.packageName in badges,
                         onClick = { AppRepository.launch(context, entry) },
                         onLongClick = { AppRepository.openAppInfo(context, entry) },
                     )
@@ -340,6 +354,46 @@ private fun SilentBoard(
                 display = display.copy(showLabels = true),
                 modifier = Modifier.padding(top = 8.dp, bottom = 10.dp),
             )
+        }
+    }
+
+    // ## 横向き（2026/9/25）
+    //
+    // この面は**巻かない**のが約束だが、横向きの高さ（約 300dp）には図が三つ入らない。
+    // 入る分に削ると縦と横で出る情報が変わるので、**二列に分け、列の中だけは巻ける**ようにした。
+    // 左に今日・七日・アプリ（入口）、右に時刻別と演者別。
+    if (isLandscape()) {
+        Row(modifier = modifier.fillMaxSize()) {
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+                    .verticalScroll(rememberScrollState()),
+            ) {
+                todayBlock()
+                weekBlock()
+                Spacer(modifier = Modifier.height(14.dp))
+                appsBlock()
+            }
+            Spacer(modifier = Modifier.width(ObservatoryDimens.Gutter))
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+                    .verticalScroll(rememberScrollState()),
+            ) {
+                hourBlock()
+                artistBlock()
+            }
+        }
+    } else {
+        Column(modifier = modifier.fillMaxSize()) {
+            todayBlock()
+            weekBlock()
+            hourBlock()
+            artistBlock()
+            Spacer(modifier = Modifier.weight(1f))
+            appsBlock()
         }
     }
 }

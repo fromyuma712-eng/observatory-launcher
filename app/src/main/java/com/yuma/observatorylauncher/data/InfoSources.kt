@@ -96,13 +96,12 @@ object InfoSources {
         val airplane = runCatching {
             Settings.Global.getInt(context.contentResolver, Settings.Global.AIRPLANE_MODE_ON) == 1
         }.getOrDefault(false)
-        val stat = StatFs(Environment.getDataDirectory().path)
-        val freeGb = stat.availableBytes / 1_073_741_824.0
         return InfoValue(
             headline = network,
-            lines = listOf(
-                if (airplane) "機内モード：入" else "機内モード：切",
-                "空き容量 %.1fGB".format(freeGb),
+            // **普段どおりの値は出さない**——「機内モード：切」は何も答えない。入っているときだけ書く。
+            // 空き容量は計器盤の「容量」の札と重なるので、ここでは書かない（2026-09-25）。
+            lines = listOfNotNull(
+                if (airplane) "機内モード：入" else null,
             ),
         )
     }
@@ -155,7 +154,8 @@ object InfoSources {
             NotificationManager.INTERRUPTION_FILTER_PRIORITY -> "通知：優先のみ"
             else -> "通知：通常"
         }
-        return InfoValue(ringer, listOf(interruption))
+        // 通知が普段どおり（通常）なら書かない。絞っているときだけ書く（2026-09-25）。
+        return InfoValue(ringer, listOfNotNull(interruption.takeIf { it != "通知：通常" }))
     }
 
     fun notifications(context: Context): InfoValue {

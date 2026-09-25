@@ -1,5 +1,9 @@
 package com.yuma.observatorylauncher
 
+import com.yuma.observatorylauncher.ui.FixedAxis
+import com.yuma.observatorylauncher.ui.TICK_MINUTE
+import com.yuma.observatorylauncher.ui.byteTickUnit
+import com.yuma.observatorylauncher.ui.niceTicksIn
 import com.yuma.observatorylauncher.ui.readableBytes
 import com.yuma.observatorylauncher.ui.readableMinutes
 import org.junit.Assert.assertEquals
@@ -55,5 +59,45 @@ class FiguresTest {
             val text = readableBytes(it)
             assertEquals(text, true, text.any { c -> c.isLetter() })
         }
+    }
+
+    // ── 固定の軸（2026/9/25） ──────────────────────────────
+
+    @Test
+    fun `降水確率の軸は0から100で動かない`() {
+        assertEquals(listOf(0f, 20f, 40f, 60f, 80f, 100f), FixedAxis.PERCENT.ticks)
+        assertEquals(0.3f, FixedAxis.PERCENT.fraction(30f), 1e-6f)
+    }
+
+    @Test
+    fun `気温の軸は10度刻みで降水の軸と目盛り線が重なる`() {
+        assertEquals(listOf(-10f, 0f, 10f, 20f, 30f, 40f), FixedAxis.TEMPERATURE.ticks)
+        assertEquals(FixedAxis.PERCENT.ticks.size, FixedAxis.TEMPERATURE.ticks.size)
+        assertEquals(FixedAxis.PERCENT.ticks.size, FixedAxis.PRESSURE.ticks.size)
+        // 20℃ は下から 3/5、降水 60% の線と同じ高さ。
+        assertEquals(FixedAxis.PERCENT.fraction(60f), FixedAxis.TEMPERATURE.fraction(20f), 1e-6f)
+    }
+
+    /** 軸の外の値は端に留める。**図の外へはみ出して他の札に描かない。** */
+    @Test
+    fun `軸の外の値は端に留まる`() {
+        assertEquals(1f, FixedAxis.TEMPERATURE.fraction(43f), 0f)
+        assertEquals(0f, FixedAxis.TEMPERATURE.fraction(-15f), 0f)
+    }
+
+    // ── 表示の単位で刻む（2026/9/25） ────────────────────────
+
+    /** ミリ秒のまま刻むと 0・41・83・125 分になっていた。**分で刻めば 0・50・100・150 分。** */
+    @Test
+    fun `使用時間の目盛りは分で切りよく刻む`() {
+        val ticks = niceTicksIn(125 * 60_000f, TICK_MINUTE).map { (it / 60_000f).toInt() }
+        assertEquals(listOf(0, 50, 100, 150), ticks)
+    }
+
+    @Test
+    fun `バイトの目盛りは大きさに合った単位で刻む`() {
+        assertEquals(1f, byteTickUnit(500f), 0f)
+        assertEquals(1024f * 1024f, byteTickUnit(300f * 1024 * 1024), 0f)
+        assertEquals(1024f * 1024f * 1024f, byteTickUnit(3f * 1024 * 1024 * 1024), 0f)
     }
 }

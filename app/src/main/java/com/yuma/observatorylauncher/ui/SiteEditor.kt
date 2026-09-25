@@ -123,7 +123,7 @@ internal fun SiteField(
     onValueChange: (TextFieldValue) -> Unit,
 ) {
     Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)) {
-        ObservatoryText(text = label, color = ObservatoryColors.Muted, size = 12.sp)
+        ObservatoryText(text = label, color = ObservatoryColors.Muted, size = ObservatoryType.Note)
         BasicTextField(
             value = value,
             onValueChange = onValueChange,
@@ -132,7 +132,7 @@ internal fun SiteField(
             textStyle = TextStyle(
                 color = ObservatoryColors.Paper,
                 fontSize = 14.sp,
-                fontFamily = FontFamily.SansSerif,
+                fontFamily = ObservatoryFonts.Sans,
             ),
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
             modifier = Modifier

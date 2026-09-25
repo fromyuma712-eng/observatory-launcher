@@ -31,7 +31,7 @@ import com.yuma.observatorylauncher.ui.theme.ObservatoryDimens
 import kotlinx.coroutines.delay
 import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.Lifecycle
-import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.yuma.observatorylauncher.data.ObservatoryNotificationListener
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.mutableStateOf
@@ -95,7 +95,7 @@ internal fun MusicTile(
                 .fillMaxWidth()
                 .clickable(
                     interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
+                    indication = PressIndication.Row,
                 ) { Music.openPlayer(context) }
                 .padding(vertical = 6.dp),
         )
@@ -204,9 +204,9 @@ private fun Control(label: String, onClick: () -> Unit) {
         modifier = Modifier
             .heightIn(min = ObservatoryDimens.Row)
             .widthIn(min = ObservatoryDimens.Row)
-            .clickable(interactionSource = interaction, indication = null, onClick = onClick),
+            .clickable(interactionSource = interaction, indication = PressIndication.Item, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        ObservatoryText(text = label, color = ObservatoryColors.Muted, size = 12.sp)
+        ObservatoryText(text = label, color = ObservatoryColors.Muted, size = ObservatoryType.Note)
     }
 }

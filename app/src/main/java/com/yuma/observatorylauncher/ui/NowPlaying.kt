@@ -1,6 +1,13 @@
 package com.yuma.observatorylauncher.ui
 
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.Image
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.Crossfade
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -9,7 +16,13 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -42,6 +55,7 @@ import com.yuma.observatorylauncher.ui.theme.ObservatoryDimens
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.horizontalDrag
 import androidx.compose.runtime.LaunchedEffect
@@ -76,6 +90,8 @@ internal fun NowPlayingPanel(
     loaded: Artwork.Loaded?,
     modifier: Modifier = Modifier,
     refreshKey: Int = 0,
+    /** ジャケットを伏せる状態（[ArtworkVeil]）。無ければ伏せない。 */
+    veil: VeilState? = null,
 ) {
     val context = LocalContext.current
     // ⚠️ **生きた値も絵柄も、外から受け取る。**
@@ -95,7 +111,12 @@ internal fun NowPlayingPanel(
     // 番号なら、二度目の知らせでも必ず動く。
     val art = remember(loaded) { loaded?.bitmap?.asImageBitmap() }
 
-    Column(modifier = modifier.fillMaxWidth()) {
+    // 絵柄の縦横比。横向きでは絵の幅をこれで決める。
+    val ratio = art
+        ?.let { (it.width.toFloat() / it.height).takeIf { r -> r.isFinite() && r > 0f } }
+        ?: 1f
+
+    val artwork: @Composable (Modifier) -> Unit = { artModifier ->
         // ## 絵柄の枡と、余った高さの使い道
         //
         // ⚠️ **正方形に切り落としていた。**
@@ -118,9 +139,8 @@ internal fun NowPlayingPanel(
             //
             // 埋めさせなければ、枡は中身の高さで畳まれ、
             // **余りは面の末尾に一度だけ**落ちる。
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f, fill = false)
+            // 大きさと重みは呼ぶ側が決める（縦向きは幅いっぱい・`weight(1f, fill = false)`）。
+            modifier = artModifier
                 // 角を丸めない。**この体系は直角で組む**——
                 // 規律を外すのは色と面積であって、形の語彙までは変えない。
                 .background(ObservatoryColors.Ground),
@@ -128,9 +148,6 @@ internal fun NowPlayingPanel(
             val boxWidth = maxWidth
             val boxHeight = maxHeight
             val image = art
-            val ratio = image
-                ?.let { (it.width.toFloat() / it.height).takeIf { r -> r.isFinite() && r > 0f } }
-                ?: 1f
 
             // ## 幅いっぱいに置けるか
             //
@@ -152,20 +169,54 @@ internal fun NowPlayingPanel(
 
             Column(modifier = Modifier.fillMaxWidth()) {
                 Box(
-                    modifier = Modifier.fillMaxWidth().height(drawHeight),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(drawHeight)
+                        // 絵の長押しでも伏せを切り替える。**人前で慌てて隠すときは、
+                        // 小さな切り替えを探すより絵そのものを押す方が早い。**
+                        .then(
+                            if (veil == null) {
+                                Modifier
+                            } else {
+                                Modifier.pointerInput(veil) {
+                                    detectTapGestures(onLongPress = { veil.toggle() })
+                                }
+                            },
+                        ),
                     contentAlignment = Alignment.TopCenter,
                 ) {
                     if (image != null) {
-                        Image(
-                            bitmap = image,
-                            contentDescription = null,
-                            contentScale = if (cropped) {
-                                ContentScale.Crop
+                        // 曲が替わったら絵は**溶けて**替わる。瞬時に差し替えると、
+                        // 絵が一瞬抜けたように見える（2026-09-25）。
+                        //
+                        // 伏せているときは、絵の代わりに**絵から採った色だけの色面**を置く（[ColorField]）。
+                        val hidden = veil?.veiled == true
+                        Crossfade(
+                            targetState = if (hidden) null else image,
+                            animationSpec = tween(360),
+                            label = "artwork",
+                        ) { shown ->
+                            if (shown == null) {
+                                ColorField(
+                                    colors = loaded?.stripe,
+                                    modifier = Modifier.size(drawWidth, drawHeight),
+                                )
                             } else {
-                                ContentScale.Fit
-                            },
-                            modifier = Modifier.size(drawWidth, drawHeight),
-                        )
+                                Image(
+                                    bitmap = shown,
+                                    contentDescription = null,
+                                    contentScale = if (cropped) {
+                                        ContentScale.Crop
+                                    } else {
+                                        ContentScale.Fit
+                                    },
+                                    modifier = Modifier
+                                        .size(drawWidth, drawHeight)
+                                        .clipToBounds()
+                                        .breathing(playing = now?.playing == true),
+                                )
+                            }
+                        }
                     } else {
                         // 取れなかった枡。罫と格点——**この面以外の語彙に戻す**。
                         Box(
@@ -201,6 +252,9 @@ internal fun NowPlayingPanel(
                 }
             }
         }
+    }
+
+    val details: @Composable () -> Unit = {
         now?.let { playing ->
             // 題を押せば、鳴らしているアプリの**今の画面**へ入る。
             // 席が `sessionActivity` を持っていればそこへ、無ければ起動口へ。
@@ -213,7 +267,7 @@ internal fun NowPlayingPanel(
                     .fillMaxWidth()
                     .clickable(
                         interactionSource = titleInteraction,
-                        indication = null,
+                        indication = PressIndication.Row,
                     ) { Music.openPlayer(context) }
                     .padding(top = 14.dp),
             )
@@ -234,6 +288,13 @@ internal fun NowPlayingPanel(
                     mono = true,
                 )
             }
+            ListeningFacts(
+                title = playing.title,
+                artist = playing.artist,
+                refreshKey = refreshKey,
+                revision = live.revision,
+                modifier = Modifier.padding(top = 4.dp),
+            )
             // ## 進行は**塗った帯**、そして**掴める**
             //
             // 面積を許した面なので、目盛りより帯の方が遠目に読める。
@@ -249,7 +310,17 @@ internal fun NowPlayingPanel(
             LaunchedEffect(live.revision) { scrub = null }
 
             playing.progress?.let { reported ->
-                val fraction = scrub ?: reported
+                // 位置は 0.5 秒ごとにしか読めないので、その間を**補間して**途切れず進める。
+                // 曲が替わった・掴んだときのように大きく飛ぶ値は、追わずにそのまま置く。
+                val flowing = remember { Animatable(reported) }
+                LaunchedEffect(reported) {
+                    if (kotlin.math.abs(reported - flowing.value) > 0.02f) {
+                        flowing.snapTo(reported)
+                    } else {
+                        flowing.animateTo(reported, tween(500, easing = LinearEasing))
+                    }
+                }
+                val fraction = scrub ?: flowing.value
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -327,7 +398,8 @@ internal fun NowPlayingPanel(
                     )
                     Spacer(modifier = Modifier.weight(1f))
                     ObservatoryText(
-                        text = Music.clock(playing.duration),
+                        // 右端は**残り**。曲の長さより「あとどれだけか」の方が、次の行動を決める。
+                        text = "−" + Music.clock((playing.duration - playing.position).coerceAtLeast(0L)),
                         color = ObservatoryColors.Muted,
                         size = ObservatoryType.Note,
                         mono = true,
@@ -339,9 +411,9 @@ internal fun NowPlayingPanel(
                 horizontalArrangement = Arrangement.SpaceEvenly,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                BigControl("◂◂", live.previous)
-                BigControl(if (playing.playing) "▮▮" else "▶", live.toggle)
-                BigControl("▸▸", live.next)
+                BigControl(live.previous) { TransportGlyph(TransportKind.PREVIOUS) }
+                BigControl(live.toggle) { PlayPauseGlyph(playing = playing.playing) }
+                BigControl(live.next) { TransportGlyph(TransportKind.NEXT) }
             }
 
             // 二段目——**席が名乗ったものだけ**を置く。
@@ -364,6 +436,37 @@ internal fun NowPlayingPanel(
             // 余りは**絵柄の枡が飲む**方が正しい——空けた隙間は隙間にしか見えないが、
             // 絵に回せば絵が大きくなる。
             WeekOfSound(refreshKey = refreshKey)
+        }
+    }
+
+    // ## 横向き（2026/9/25）
+    //
+    // 縦向きは絵を幅いっぱいに置き、その下に操作を積む。横向きで同じことをすると
+    // 絵だけで高さが尽きるので、**絵を左に高さいっぱい、操作と数値を右に置く。**
+    // 右の列は巻けるようにする——高さが縦向きの半分しか無く、入る分に削ると
+    // 縦と横で出る情報が変わってしまう。
+    if (isLandscape()) {
+        Row(modifier = modifier.fillMaxWidth()) {
+            artwork(
+                Modifier
+                    .fillMaxHeight()
+                    // 極端に細長い絵で右の列が潰れないよう、比は 1:2〜2:1 に収める。
+                    .aspectRatio(ratio.coerceIn(0.5f, 2f), matchHeightConstraintsFirst = true),
+            )
+            Spacer(modifier = Modifier.width(ObservatoryDimens.Gutter))
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+                    .verticalScroll(rememberScrollState()),
+            ) {
+                details()
+            }
+        }
+    } else {
+        Column(modifier = modifier.fillMaxWidth()) {
+            artwork(Modifier.fillMaxWidth().weight(1f, fill = false))
+            details()
         }
     }
 }
@@ -445,7 +548,7 @@ private fun SeatMark(
     Column(
         modifier = Modifier
             .heightIn(min = ObservatoryDimens.Row)
-            .clickable(interactionSource = interaction, indication = null, onClick = onClick)
+            .clickable(interactionSource = interaction, indication = PressIndication.Item, onClick = onClick)
             .padding(horizontal = 10.dp, vertical = 6.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
@@ -461,13 +564,20 @@ private fun SeatMark(
             ObservatoryText(text = mark.label, color = ink, size = ObservatoryType.Body)
         }
         if (mark.stateText != null) {
-            ObservatoryText(
-                text = mark.stateText,
-                color = if (mark.hot) ObservatoryColors.EmberText else ObservatoryColors.Faint,
-                size = ObservatoryType.Label,
-                mono = true,
-                modifier = Modifier.padding(top = 4.dp),
-            )
+            // 二値の状態は欧文（ON / OFF）。読めない言葉はアプリが書いた通りに出す。
+            val color = if (mark.hot) ObservatoryColors.EmberText else ObservatoryColors.Faint
+            val modifier = Modifier.padding(top = 4.dp)
+            when (mark.state) {
+                Music.Switch.ON -> ObservatoryTag(Lexicon.ON, modifier, color)
+                Music.Switch.OFF -> ObservatoryTag(Lexicon.OFF, modifier, color)
+                else -> ObservatoryText(
+                    text = mark.stateText,
+                    color = color,
+                    size = ObservatoryType.Label,
+                    mono = true,
+                    modifier = modifier,
+                )
+            }
         }
     }
 }
@@ -546,12 +656,7 @@ private fun DayTape(refreshKey: Int, revision: Int, modifier: Modifier = Modifie
                 },
         )
         Row(modifier = Modifier.fillMaxWidth().padding(top = 5.dp)) {
-            ObservatoryText(
-                text = "今日の音",
-                color = ObservatoryColors.Faint,
-                size = ObservatoryType.Label,
-                mono = true,
-            )
+            ObservatoryTag(text = Lexicon.TODAY)
             Spacer(modifier = Modifier.weight(1f))
             ObservatoryText(
                 text = Music.timeOfDay(spans.first().first.at) + " から",
@@ -588,12 +693,7 @@ private fun SoundDetail(refreshKey: Int, trackKey: String) {
         // 次にかかるもの。**これだけは行を分ける**——題は長く、他の値と並ばない。
         d.next?.let { next ->
             Row(verticalAlignment = Alignment.Bottom) {
-                ObservatoryText(
-                    text = "次",
-                    color = ObservatoryColors.Muted,
-                    size = ObservatoryType.Note,
-                    mono = true,
-                )
+                ObservatoryTag(text = Lexicon.NEXT, color = ObservatoryColors.Muted)
                 Spacer(modifier = Modifier.width(10.dp))
                 ObservatoryText(
                     text = next,
@@ -606,7 +706,7 @@ private fun SoundDetail(refreshKey: Int, trackKey: String) {
         val marks = buildList {
             d.album?.let { add(it) }
             d.year?.let { add(it) }
-            d.queueSize?.let { add("列 ${it}曲") }
+            d.queueSize?.let { add(Lexicon.QUEUE.uppercase() + " ${it}曲") }
             d.speed?.let { add("×%.2f".format(it)) }
         }
         if (marks.isNotEmpty()) {
@@ -626,6 +726,7 @@ private fun SoundDetail(refreshKey: Int, trackKey: String) {
  * **前週比があって初めて、今週の数字が意味を持つ。**
  * 「6時間12分」だけでは多いか少ないか判じられない。
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun WeekOfSound(refreshKey: Int) {
     val context = LocalContext.current
@@ -639,21 +740,25 @@ private fun WeekOfSound(refreshKey: Int) {
                 .height(1.dp)
                 .background(ObservatoryColors.LineStrong),
         )
-        Row(
+        // ⚠️ **四等分の枠に押し込まない。**
+        // 以前は四つを `weight(1f)` で等分し、22sp の値を約 90dp の枠へ入れていた。
+        // 「12時間34分」は枠に入らず、省略記号で切れた（本人の指摘・2026/9/25）。
+        // 値の長さなりの幅で並べ、入り切らなければ次の段へ送る。
+        FlowRow(
             modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
-            verticalAlignment = Alignment.Bottom,
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             // ⚠️ 数えているのは**今から遡って七日**であって、暦の上の「今週」ではない。
             // 計器盤の「七日」とも揃う（2026/9/2 の点検）。
-            WeekCell("七日", readableMinutes(w.listenedMs), Modifier.weight(1f))
-            WeekCell("曲", "${w.plays}", Modifier.weight(1f))
-            WeekCell("演者", "${w.artists}", Modifier.weight(1f))
+            WeekCell(Lexicon.WEEK, readableMinutes(w.listenedMs))
+            WeekCell(Lexicon.TRACKS, "${w.plays}")
+            WeekCell(Lexicon.ARTISTS, "${w.artists}")
             // 前週比は根拠があるときだけ。
             w.changePercent?.let {
                 WeekCell(
-                    "前の七日比",
+                    Lexicon.VERSUS_PREVIOUS,
                     (if (it >= 0) "+" else "") + it + "%",
-                    Modifier.weight(1f),
                     hot = it > 0,
                 )
             }
@@ -662,14 +767,9 @@ private fun WeekOfSound(refreshKey: Int) {
 }
 
 @Composable
-private fun WeekCell(label: String, value: String, modifier: Modifier, hot: Boolean = false) {
-    Column(modifier = modifier) {
-        ObservatoryText(
-            text = label,
-            color = ObservatoryColors.Muted,
-            size = ObservatoryType.Note,
-            mono = true,
-        )
+private fun WeekCell(label: String, value: String, hot: Boolean = false) {
+    Column(modifier = Modifier.padding(end = 12.dp)) {
+        ObservatoryTag(text = label, color = ObservatoryColors.Muted)
         ObservatoryText(
             text = value,
             color = if (hot) ObservatoryColors.EmberText else ObservatoryColors.Paper,
@@ -681,14 +781,71 @@ private fun WeekCell(label: String, value: String, modifier: Modifier, hot: Bool
 
 /** 大きな操作。押し所は HIG の最小(44dp)を上回らせる——この面では指で操作するものが主役である。 */
 @Composable
-private fun BigControl(label: String, onClick: () -> Unit) {
+private fun BigControl(onClick: () -> Unit, glyph: @Composable () -> Unit) {
     val interaction = remember { MutableInteractionSource() }
     Box(
         modifier = Modifier
             .size(64.dp)
-            .clickable(interactionSource = interaction, indication = null, onClick = onClick),
+            .clickable(interactionSource = interaction, indication = PressIndication.Item, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        ObservatoryText(text = label, color = ObservatoryColors.Paper, size = 20.sp)
+        glyph()
     }
+}
+
+
+/**
+ * 呼吸。**鳴っている間だけ、絵が 12 秒かけてわずかに寄って引く。** 止めれば静まる。
+ *
+ * 遊び心の一つ（本人・2026-09-25「音楽の画面をもう少し解像したい」）。寄せは 3% に留める
+ * ——それ以上は「動いている絵」になり、見る人の目を奪う。
+ */
+@Composable
+private fun Modifier.breathing(playing: Boolean): Modifier {
+    val breath = remember { Animatable(0f) }
+    LaunchedEffect(playing) {
+        if (!playing) {
+            breath.animateTo(0f, tween(1200))
+            return@LaunchedEffect
+        }
+        while (true) {
+            breath.animateTo(1f, tween(6000, easing = FastOutSlowInEasing))
+            breath.animateTo(0f, tween(6000, easing = FastOutSlowInEasing))
+        }
+    }
+    return graphicsLayer {
+        val s = 1f + 0.03f * breath.value
+        scaleX = s
+        scaleY = s
+    }
+}
+
+/**
+ * 聴取の小話。**この曲を今週何回かけたか、今日の何曲目か。** 手元の記録（[Listening]）から数える。
+ *
+ * 数えるのは記録してよい二つのアプリ（Apple Music・YouTube Music）の分だけ。
+ */
+@Composable
+private fun ListeningFacts(title: String, artist: String, refreshKey: Int, revision: Int, modifier: Modifier = Modifier) {
+    val log by rememberPlays(refreshKey + revision, Hidden.DROP)
+    val text = remember(log, title, artist) {
+        if (log.isEmpty() || title.isBlank()) return@remember null
+        val now = System.currentTimeMillis()
+        val week = 7L * 24 * 60 * 60_000
+        val same = log.filter { it.title == title && it.artist == artist }
+        val thisWeek = same.count { now - it.at <= week }
+        val today = Listening.today(log, now).size
+        val repeat = when {
+            same.size <= 1 -> "この30日ではじめて"
+            else -> "今週 ${thisWeek}回目"
+        }
+        repeat + "  ∧  今日 ${today}曲目"
+    } ?: return
+    ObservatoryText(
+        text = text,
+        color = ObservatoryColors.Faint,
+        size = ObservatoryType.Label,
+        mono = true,
+        modifier = modifier,
+    )
 }

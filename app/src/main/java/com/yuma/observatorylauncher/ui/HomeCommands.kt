@@ -20,6 +20,8 @@ internal data class HomeCommands(
     val toggleMenu: () -> Unit,
     val cycleIconSize: () -> Unit,
     val toggleLabels: () -> Unit,
+    /** 像を単色⇔原色に切り替える。 */
+    val toggleIconTone: () -> Unit = {},
     val addInfo: () -> Unit,
     val addWidget: () -> Unit,
     val addSite: () -> Unit,
